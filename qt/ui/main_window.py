@@ -23,8 +23,11 @@ from core import APP_NAME, APP_VERSION, REPO_URL
 from core.hexutil import bytes_to_hex_text, try_parse_hex_text
 from core.rx_buffer import RxBuffer
 from core.serial_worker import SerialWorker
+from core.settings import read_setting, write_setting
+from core.update_check import RELEASES_PAGE, check_app_update
 from ui.find_bar import FindBar
 from ui.history_edit import HistoryLineEdit
+from ui.modbus_panel import ModbusPanel
 from ui.theme import RX_COLOR, SYS_COLOR, TIME_COLOR, TX_COLOR
 from ui.wave_window import WaveWindow
 
@@ -39,6 +42,26 @@ def _stamp() -> str:
     return time.strftime('%H:%M:%S')
 
 
+class _UpdateCheckRunnable(QtCore.QRunnable):
+    """网络查询放线程池，UI 不卡（Qt 版比主线 PS 定时器方案干净的地方）。"""
+
+    class Signals(QtCore.QObject):
+        done = QtCore.Signal(dict)
+
+    def __init__(self, check_fn, version: str):
+        super().__init__()
+        self._check_fn = check_fn
+        self._version = version
+        self.signals = self.Signals()
+
+    def run(self):
+        try:
+            result = self._check_fn(self._version)
+        except Exception as exc:  # 防御：check_app_update 理论上不抛
+            result = {'ok': False, 'has_update': False, 'note': str(exc)}
+        self.signals.done.emit(result)
+
+
 class MainWindow(QtWidgets.QMainWindow):
     FLUSH_INTERVAL_MS = 200
 
@@ -51,6 +74,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker: SerialWorker | None = None
         self._max_log_blocks = 20000
         self._file_send: dict | None = None
+        self._modbus_rx_acc = bytearray()  # Modbus 事务在途时的响应累积
 
         # ---- 顶部连接行 ----
         self.combo_port = QtWidgets.QComboBox()
@@ -131,11 +155,15 @@ class MainWindow(QtWidgets.QMainWindow):
         terminal_layout.addWidget(self.log, 1)
         terminal_layout.addLayout(bottom)
 
-        # ---- 页签：终端 / 波形（后续插件页也挂这里） ----
+        # ---- 页签：终端 / 波形 / Modbus ----
         self.wave = WaveWindow()
+        self.modbus = ModbusPanel()
+        self.modbus.transport = self.modbus_transport
+        self.modbus.log_fn = self._append_log
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(terminal, '终端')
         self.tabs.addTab(self.wave, '波形')
+        self.tabs.addTab(self.modbus, 'Modbus')
         self.tabs.setObjectName('main_tabs')
         self.setCentralWidget(self.tabs)
 
@@ -151,6 +179,61 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_timer.setInterval(FILE_INTERVAL_MS)
 
         self.refresh_ports()
+
+        # ---- 帮助菜单：检查更新 / 关于 ----
+        menu_help = self.menuBar().addMenu('帮助')
+        act_check = QtGui.QAction('检查更新', self)
+        act_check.triggered.connect(lambda: self._run_update_check(manual=True))
+        menu_help.addAction(act_check)
+        act_about = QtGui.QAction('关于', self)
+        act_about.triggered.connect(self._show_about)
+        menu_help.addAction(act_about)
+        self._update_check_fn = check_app_update  # 测试可注入替换
+
+        # 启动更新检查：24h 节流（对齐主线），延迟 3s 等界面稳定
+        QtCore.QTimer.singleShot(3000, self._maybe_auto_update_check)
+
+    # ---------- 检测更新 ----------
+
+    UPDATE_CHECK_INTERVAL_S = 24 * 3600
+
+    def _maybe_auto_update_check(self):
+        try:
+            last = float(read_setting('update/last_check', '0') or 0)
+        except ValueError:
+            last = 0.0
+        if time.time() - last < self.UPDATE_CHECK_INTERVAL_S:
+            return
+        write_setting('update/last_check', str(time.time()))
+        self._run_update_check(manual=False)
+
+    def _run_update_check(self, manual: bool):
+        version = APP_VERSION
+        runnable = _UpdateCheckRunnable(self._update_check_fn, version)
+        runnable.signals.done.connect(
+            lambda result: self._on_update_result(result, manual))
+        QtCore.QThreadPool.globalInstance().start(runnable)
+
+    def _on_update_result(self, result: dict, manual: bool):
+        if result.get('has_update'):
+            self._append_log('SYS', f"发现新版本 {result['latest']}"
+                                    f"（当前 v{APP_VERSION}），下载: {result['page_url']}")
+            self.set_status(f"有新版本 {result['latest']}（当前 v{APP_VERSION}）", 'status_ok')
+            return
+        if manual and result.get('ok'):
+            self._append_log('SYS', f"已是最新版本（v{APP_VERSION}）")
+        elif manual:
+            self._append_log('SYS', f"检查更新失败: {result.get('note', '')}")
+        # 自动检查失败静默（对齐主线）
+
+    def _show_about(self):
+        QtWidgets.QMessageBox.about(
+            self, f'关于 {APP_NAME}',
+            f'<b>{APP_NAME}</b> v{APP_VERSION}<br>'
+            f'PowerShell 主线（v1.1.0）的 Qt 前端支线实验版。<br>'
+            f'仓库: <a href="{REPO_URL}">{REPO_URL}</a><br>'
+            f'发布页: <a href="{RELEASES_PAGE}">{RELEASES_PAGE}</a><br>'
+            f'许可证: GPL-3.0')
 
     # ---------- 串口 ----------
 
@@ -215,8 +298,51 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             for line in self.buffer.feed(data, now):
                 self._append_log('RX', line)
+        self._modbus_rx_acc.extend(data)
         self.wave.consume_bytes(data)
         self._update_backlog()
+
+    def modbus_transport(self, frame: bytes, timeout_ms: int = 600) -> bytes:
+        """Modbus 线上事务：清残留 → 写请求 → 有界读响应（对齐主线 send_modbus_wire_transaction）。
+
+        响应长度可预期（功能码/异常位推出）或静默 150ms 即收；整体不超过 timeout_ms。
+        """
+        if not self.worker:
+            return b''
+        self._modbus_rx_acc = bytearray()
+        if not self.worker.write_bytes(frame):
+            return b''
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        idle_at = time.monotonic() + 0.15
+        expected = -1
+
+        loop = QtCore.QEventLoop()
+        poll = QtCore.QTimer(loop)
+        poll.setInterval(10)
+
+        def check():
+            nonlocal expected, idle_at
+            acc = self._modbus_rx_acc
+            now = time.monotonic()
+            if acc:
+                idle_at = now + 0.15
+                if expected < 0 and len(acc) >= 3:
+                    expected = 5 if (acc[1] & 0x80) else 3 + acc[2] + 2
+                if 0 <= expected <= len(acc):
+                    loop.quit()
+                    return
+                if now > idle_at:
+                    loop.quit()
+                    return
+            if now > deadline:
+                loop.quit()
+
+        poll.timeout.connect(check)
+        poll.start()
+        loop.exec()
+        resp = bytes(self._modbus_rx_acc)
+        self._modbus_rx_acc = bytearray()
+        return resp
 
     def on_flush_tick(self):
         now = time.monotonic()

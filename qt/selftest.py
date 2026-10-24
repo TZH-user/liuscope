@@ -371,6 +371,191 @@ def test_main_window_m3():
     print('MAINWINDOW M3 OK')
 
 
+def test_modbus_core():
+    from core.modbus import (WatchItem, build_modbus_request, decode_modbus_registers,
+                             get_modbus_crc16, merge_watch_groups, parse_modbus_response,
+                             slice_watch_value, test_modbus_crc, watch_flash_tone)
+
+    # CRC16 经典向量：01 03 00 00 00 02 → C4 0B（低字节在前）
+    assert get_modbus_crc16(bytes.fromhex('010300000002')) == bytes.fromhex('C40B')
+    frame, error = build_modbus_request(1, 3, 0, 2)
+    assert error == '' and frame == bytes.fromhex('010300000002C40B')
+    assert test_modbus_crc(frame) and not test_modbus_crc(frame[:-2] + b'\x00\x00')
+
+    # 组帧边界：03 数量 126 拒绝；06 写值 0x2000；05 置位 0xFF00；16 列表
+    _f, e = build_modbus_request(1, 3, 0, 126)
+    assert '1~125' in e
+    f6, e6 = build_modbus_request(1, 6, 0x10, 1, value_text='0x2000')
+    assert f6[:6] == bytes.fromhex('010600102000') and test_modbus_crc(f6)
+    f5, _ = build_modbus_request(1, 5, 4, 1, value_text='on')
+    assert f5[4:6] == b'\xff\x00'
+    f16, e16 = build_modbus_request(2, 16, 0, 0, value_list=['100', '0x2000', '-5'])
+    assert e16 == '' and f16[6] == 6 and f16[4:6] == b'\x00\x03'
+    # -5 按 0xFFFB 收（band 0xFFFF，与主线一致）
+    assert f16[7:13] == bytes.fromhex('0064') + bytes.fromhex('2000') + bytes.fromhex('FFFB')
+
+    # 响应解析：2 寄存器 0x000A 0x0102 → 十进制 '10, 258'
+    body = bytes.fromhex('010304000A0102')
+    resp = body + get_modbus_crc16(body)
+    parsed = parse_modbus_response(resp, 3, 1, 2)
+    assert parsed['ok'] and parsed['reg_bytes'] == bytes.fromhex('000A0102')
+    assert decode_modbus_registers(parsed['reg_bytes'], '十进制') == '10, 258'
+    assert decode_modbus_registers(parsed['reg_bytes'], 'HEX') == '0x000A, 0x0102'
+    assert decode_modbus_registers(bytes.fromhex('FFFF'), '有符号') == '-1'
+    # float32(ABCD)：寄存器 0x42F6 0x0000 → 123.0
+    assert decode_modbus_registers(bytes.fromhex('42F60000'), 'float32(ABCD)') == '123'
+
+    # 异常帧：01 83 02 + CRC
+    exc_body = bytes.fromhex('018302')
+    exc = exc_body + get_modbus_crc16(exc_body)
+    parsed = parse_modbus_response(exc, 3, 1, 2)
+    assert not parsed['ok'] and '02 非法数据地址' in parsed['error']
+    # CRC 坏帧
+    parsed = parse_modbus_response(resp[:-2] + b'\x00\x00', 3, 1, 2)
+    assert parsed['error'] == 'CRC 校验失败'
+
+    # Watch 合并：间隙≤4 并区间，超上限不并
+    items = [WatchItem(1, 3, 0, 2), WatchItem(1, 3, 4, 3), WatchItem(1, 3, 100, 1)]
+    groups = merge_watch_groups(items)
+    assert len(groups) == 2
+    assert (groups[0]['start'], groups[0]['count']) == (0, 7)
+    # 切片：合并响应里地址 4、数量 3 的项取 00 01 00 02 00 03 → '1, 2, 3'
+    text, raw = slice_watch_value(bytes.fromhex('000A01020064000F000100020003'), 3, 0, items[1])
+    assert text == '1, 2, 3' and raw == '00 01 00 02 00 03'
+    # 线圈切片：fc1，字节 0b00000101 → 位 0,2 = 1
+    bit_item = WatchItem(1, 1, 0, 3)
+    text, _ = slice_watch_value(b'\x05', 1, 0, bit_item)
+    assert text == '1,0,1'
+    # 闪烁语义
+    assert watch_flash_tone('10', '11') == 'up'
+    assert watch_flash_tone('10', '9') == 'down'
+    assert watch_flash_tone('10', '10') == 'same'
+    assert watch_flash_tone('ok', '10') == 'changed'
+    print('MODBUS CORE OK')
+
+
+def test_modbus_panel():
+    from PySide6 import QtWidgets
+
+    from core.modbus import get_modbus_crc16
+    from ui.main_window import MainWindow
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
+    panel = win.modbus
+
+    # 假从站：03 读保持寄存器 → 固定回 2 寄存器 0x0064 0x00C8（100,200）
+    def fake_slave(frame: bytes, timeout_ms: int = 600) -> bytes:
+        assert frame[-2:] == get_modbus_crc16(frame[:-2])
+        if frame[1] == 3:
+            body = bytes([frame[0], 3, 4, 0, 100, 0, 200])
+            return body + get_modbus_crc16(body)
+        body = bytes([frame[0], frame[1]]) + frame[2:3] + b'\x02'
+        return (body + get_modbus_crc16(body))[:5]  # 异常响应占位（本测试不会走到）
+
+    panel.transport = fake_slave
+    win_modbus_logs = []
+
+    panel.spin_slave.setValue(1)
+    panel.combo_fc.setCurrentIndex(2)   # 03
+    panel.spin_start.setValue(0)
+    panel.spin_count.setValue(2)
+    panel.run_transaction()
+    assert '寄存器[2] 十进制: 100, 200' in panel.result_box.toPlainText()
+    assert panel.lbl_frame.text() == '发送: 01 03 00 00 00 02 C4 0B'
+
+    # 事务回写主日志（TX/RX [Modbus] 条目，Ctrl+F 可检索）
+    panel.log_fn = lambda d, t: win_modbus_logs.append((d, t))
+    panel.run_transaction()
+    assert ('TX', '[Modbus] 01 03 00 00 00 02 C4 0B') in win_modbus_logs
+    assert any(d == 'RX' and t.startswith('[Modbus] 01 03 04') for d, t in win_modbus_logs)
+
+    # 监视：加两项（同从站同功能码、地址近邻）→ 合并成一轮读，行值回填
+    panel.spin_start.setValue(0)
+    panel.spin_count.setValue(1)
+    panel.edit_value.setText('温度')
+    panel.add_watch()
+    panel.spin_start.setValue(1)
+    panel.add_watch()
+    assert len(panel.watch_items) == 2
+    panel.chk_watch.setChecked(True)
+    panel.run_watch_cycle()
+    assert panel.watch_table.item(0, 4).text() == '100'
+    assert panel.watch_table.item(1, 4).text() == '200'
+    assert '无响应' not in panel.watch_table.item(0, 5).text()
+
+    # 未连接提示（transport 置空）
+    panel.transport = None
+    panel.run_transaction()
+    assert '串口未连接' in panel.result_box.toPlainText()
+
+    win.close()
+    print('MODBUS PANEL OK')
+
+
+def test_update_check():
+    import io
+    import json
+
+    from core.update_check import compare_app_versions, get_version_tuple, check_app_update
+
+    assert get_version_tuple('v1.2.10') == (1, 2, 10)
+    assert get_version_tuple('1.2') == (1, 2, 0)
+    assert get_version_tuple('0.2.0-qt') == (0, 2, 0)
+    assert get_version_tuple('v1.x.3') == (1, 0, 3)
+    assert compare_app_versions('1.1.0', 'v1.0.0') == 1
+    assert compare_app_versions('1.1.0', '1.1.0') == 0
+    assert compare_app_versions('0.9.9', '1.0.0') == -1
+    assert compare_app_versions('1.1', '1.1.0') == 0
+
+    def fake_opener_ok(request, timeout=10):
+        return io.BytesIO(json.dumps({'tag_name': 'v9.9.9', 'body': '新版说明'}).encode())
+
+    result = check_app_update('1.1.0', opener=fake_opener_ok)
+    assert result['ok'] and result['has_update'] and result['latest'] == 'v9.9.9'
+    assert result['note'] == '新版说明' and result['current'] == '1.1.0'
+
+    def fake_opener_old(request, timeout=10):
+        return io.BytesIO(json.dumps({'tag_name': 'v0.0.1'}).encode())
+    result = check_app_update('1.1.0', opener=fake_opener_old)
+    assert result['ok'] and not result['has_update']
+
+    def fake_opener_dead(request, timeout=10):
+        raise OSError('network unreachable')
+
+    result = check_app_update('1.1.0', opener=fake_opener_dead)
+    assert not result['ok'] and 'network unreachable' in result['note']
+    print('UPDATE CHECK OK')
+
+
+def test_update_ui():
+    from PySide6 import QtWidgets
+
+    from ui.main_window import MainWindow
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
+
+    win._on_update_result({'ok': True, 'has_update': True, 'latest': 'v9.9.9',
+                           'page_url': 'https://example.com', 'note': ''}, manual=False)
+    assert '发现新版本 v9.9.9' in win.log.toPlainText()
+    assert '有新版本 v9.9.9' in win.lbl_status.text()
+
+    win._on_update_result({'ok': True, 'has_update': False}, manual=True)
+    assert '已是最新版本' in win.log.toPlainText()
+
+    win._on_update_result({'ok': False, 'has_update': False, 'note': '超时'}, manual=True)
+    assert '检查更新失败: 超时' in win.log.toPlainText()
+
+    win._on_update_result({'ok': False, 'has_update': False, 'note': '静默'}, manual=False)
+    assert '静默' not in win.log.toPlainText(), '自动检查失败不打扰'
+
+    win.close()
+    print('UPDATE UI OK')
+
+
 def run_selftest() -> int:
     import os
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -380,6 +565,10 @@ def run_selftest() -> int:
     test_wave_protocols()
     test_wave_window()
     test_main_window_m3()
+    test_modbus_core()
+    test_modbus_panel()
+    test_update_check()
+    test_update_ui()
     print('QT_SPIKE_SELFTEST_OK')
     return 0
 
