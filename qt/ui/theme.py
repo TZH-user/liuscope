@@ -17,6 +17,17 @@ QPushButton { background: #0E639C; color: white; border: none;
 QPushButton:hover { background: #1177BB; }
 QPushButton:pressed { background: #0A4E7E; }
 QPushButton:disabled { background: #3E546A; }
+QPushButton#tool { background: #2A3244; padding: 3px 10px; }
+QPushButton#tool:hover { background: #38435A; }
+QPushButton#tool:checked { background: #0E639C; color: white; }
+QTabWidget::pane { border: 1px solid #2A3140; }
+QTabBar::tab { background: #1C212D; color: #9AA4B2; padding: 5px 18px;
+               border: 1px solid #2A3140; border-bottom: none; }
+QTabBar::tab:selected { background: #1E2430; color: #E1E6F0; }
+QTabBar::tab:hover { color: #E1E6F0; }
+QCheckBox { spacing: 4px; }
+QSpinBox { background: #262D3A; color: #E1E6F0;
+           border: 1px solid #3E546A; border-radius: 4px; padding: 2px 4px; }
 QLabel { background: transparent; }
 QLabel#backlog { color: #969EAC; }
 QLabel#status_ok  { color: #4EC9B0; }

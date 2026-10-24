@@ -4,3 +4,4 @@ gui_settings.txt
 ~$\*
 __pycache__/
 *.pyc
+gui_settings_qt.ini

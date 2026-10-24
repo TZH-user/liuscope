@@ -16,6 +16,7 @@ from core import APP_NAME, APP_VERSION, REPO_URL
 from core.rx_buffer import RxBuffer
 from core.serial_worker import SerialWorker
 from ui.theme import RX_COLOR, SYS_COLOR, TIME_COLOR, TX_COLOR
+from ui.wave_window import WaveWindow
 
 
 def _stamp() -> str:
@@ -74,12 +75,20 @@ class MainWindow(QtWidgets.QMainWindow):
         bottom.addWidget(self.btn_send)
         bottom.addWidget(self.lbl_backlog, 1)
 
-        central = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(central)
-        layout.addLayout(top)
-        layout.addWidget(self.log, 1)
-        layout.addLayout(bottom)
-        self.setCentralWidget(central)
+        terminal = QtWidgets.QWidget()
+        terminal_layout = QtWidgets.QVBoxLayout(terminal)
+        terminal_layout.setContentsMargins(0, 0, 0, 0)
+        terminal_layout.addLayout(top)
+        terminal_layout.addWidget(self.log, 1)
+        terminal_layout.addLayout(bottom)
+
+        # ---- 页签：终端 / 波形（后续插件页也挂这里） ----
+        self.wave = WaveWindow()
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.addTab(terminal, '终端')
+        self.tabs.addTab(self.wave, '波形')
+        self.tabs.setObjectName('main_tabs')
+        self.setCentralWidget(self.tabs)
 
         self.flush_timer = QtCore.QTimer(self)
         self.flush_timer.timeout.connect(self.on_flush_tick)
@@ -130,6 +139,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_status.style().polish(self.lbl_status)
 
     def closeEvent(self, event):  # noqa: N802 (Qt 命名)
+        self.wave.stop_timers()
         self._teardown_worker()
         super().closeEvent(event)
 
@@ -139,6 +149,7 @@ class MainWindow(QtWidgets.QMainWindow):
         now = time.monotonic()
         for line in self.buffer.feed(data, now):
             self._append_log('RX', line)
+        self.wave.consume_bytes(data)
         self._update_backlog()
 
     def on_flush_tick(self):
