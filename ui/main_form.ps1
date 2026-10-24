@@ -39,6 +39,24 @@ function update_port_combobox {
             break
         }
     }
+
+    # 列表没变化就整段跳过重建：端口监视定时器每 2s 走到这里，
+    # Clear→重加→重选 的中间态会被绘制出来（闭合区文字闪一下消失又回来）；
+    # 设备没增减时重建纯属抖动源，也省掉每 2s 两轮 SelectedIndexChanged 副作用
+    $old_items = @($combobox_port.Items | ForEach-Object { $_ })
+    if ($old_items.Count -eq $items.Count -and $combobox_port.SelectedIndex -ge 0) {
+        $same = $true
+        for ($i = 0; $i -lt $items.Count; $i++) {
+            if ([string]$old_items[$i] -ne [string]$items[$i]) {
+                $same = $false
+                break
+            }
+        }
+        if ($same) {
+            return
+        }
+    }
+
     $combobox_port.Items.Clear()
     foreach ($item in $items) {
         [void]$combobox_port.Items.Add($item)

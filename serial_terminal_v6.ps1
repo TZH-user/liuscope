@@ -571,18 +571,23 @@ public class DarkComboBox : ComboBox
             if (UseDark && this.IsHandleCreated && !this.DroppedDown) { PaintDarkChrome(); }
             return;
         }
-        if (UseDark && _editBrush != IntPtr.Zero)
+        if (UseDark &&
+            (m.Msg == 0x0133 || m.Msg == 0x0134 || m.Msg == 0x0138 || m.Msg == 0x2134 || m.Msg == 0x2138))
         {
-            // 0x2138 = WM_REFLECT|WM_CTLCOLORSTATIC：DropDownList 闭合区衬底画刷
-            // 0x2134 = WM_REFLECT|WM_CTLCOLORLISTBOX：下拉列表空白区画刷
             // 0x0133 = WM_CTLCOLOREDIT：DropDown 内嵌子 EDIT 的画刷
-            if (m.Msg == 0x2138 || m.Msg == 0x2134 || m.Msg == 0x0133)
+            // 0x0134 = WM_CTLCOLORLISTBOX：下拉列表空白区衬底——列表是组合框的子窗口，
+            //          原生直发到本控件；反射变体 0x2134 在这条路径上根本到不了，
+            //          此前只匹配反射号，弹层衬底一直走系统白（下拉白底闪现的根因）
+            // 0x0138 = WM_CTLCOLORSTATIC：闭合区在禁用/擦除路径上的衬底
+            // 画刷按需惰性创建：不依赖 EnableDarkEdit 先行（波形窗组合框没走那条路）
+            if (_editBrush == IntPtr.Zero)
             {
-                SetTextColor(m.WParam, EditFore.R | (EditFore.G << 8) | (EditFore.B << 16));
-                SetBkColor(m.WParam, EditBack.R | (EditBack.G << 8) | (EditBack.B << 16));
-                m.Result = _editBrush;
-                return;
+                _editBrush = CreateSolidBrush(EditBack.R | (EditBack.G << 8) | (EditBack.B << 16));
             }
+            SetTextColor(m.WParam, EditFore.R | (EditFore.G << 8) | (EditFore.B << 16));
+            SetBkColor(m.WParam, EditBack.R | (EditBack.G << 8) | (EditBack.B << 16));
+            m.Result = _editBrush;
+            return;
         }
         base.WndProc(ref m);
     }
@@ -616,6 +621,14 @@ public class DarkComboBox : ComboBox
                 g.FillPolygon(b, new Point[]{
                     new Point(cx - s, cy - s / 2), new Point(cx + s, cy - s / 2), new Point(cx, cy + s / 2) });
         }
+    }
+
+    // 尺寸变化后旧 item 区坐标失效：清空，待下次 OnDrawItem 重新捕获。
+    // 否则 PaintDarkChrome 用旧矩形补衬底，可能把新尺寸下的文字带一起擦掉（文字偶发消失）
+    protected override void OnResize(EventArgs e)
+    {
+        _itemBounds = Rectangle.Empty;
+        base.OnResize(e);
     }
 
     protected override void OnDrawItem(DrawItemEventArgs e)
@@ -1046,8 +1059,8 @@ $script:ui_palettes = @{
         # —— 日志文字与语义色 ——
         LogTextRx      = [System.Drawing.Color]::FromArgb(212, 212, 212)  # #D4D4D4
         LogTextTx      = [System.Drawing.Color]::FromArgb(86, 156, 214)   # #569CD6 VS Code 蓝（发送记录）
-        StatusBg       = [System.Drawing.Color]::FromArgb(14, 99, 156)    # #0E639C VS Code 状态条
-        StatusFg       = [System.Drawing.Color]::FromArgb(255, 255, 255)  # #FFFFFF
+        StatusBg       = [System.Drawing.Color]::FromArgb(30, 36, 48)     # #1E2430 静音深底——大面积亮蓝(#0E639C)与暗面板冲突；连接态仍用 OkText/ErrText 着色
+        StatusFg       = [System.Drawing.Color]::FromArgb(154, 164, 178)  # #9AA4B2
         HitText        = [System.Drawing.Color]::FromArgb(244, 135, 113)  # #F48771
         OkText         = [System.Drawing.Color]::FromArgb(78, 201, 176)   # #4EC9B0
         WarnText       = [System.Drawing.Color]::FromArgb(204, 167, 0)    # #CCA700

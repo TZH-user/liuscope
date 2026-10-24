@@ -2655,6 +2655,8 @@ function open_wave_window {
         $wc.ArrowBack = $wave_input_bg
         $wc.ArrowFore = $wave_text_fg
         $wc.BorderColor = $sep_color
+        # 下拉弹层衬底/子 EDIT 画刷颜色对齐输入框（DarkComboBox 内部惰性建刷用这两个色）
+        $wc.EnableDarkEdit($true, $wave_input_bg, $wave_text_fg)
     }
     foreach ($wt in @($script:wtext_ymin, $script:wtext_ymax, $script:wtext_filter_param)) {
         $wt.BackColor = $wave_input_bg
