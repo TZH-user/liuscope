@@ -1,9 +1,10 @@
 # serialscope · RK3562 串口收发工具 V6
 
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-blue)
-![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE)
+![PowerShell](https://img.shields.io/badge/PowerShell-WinPS%205.1-5391FE)
 ![UI](https://img.shields.io/badge/UI-WinForms%20%E5%8F%8C%E4%B8%BB%E9%A2%98-4EC9B0)
 ![安装](https://img.shields.io/badge/%E4%BE%9D%E8%B5%96-%E9%9B%B6%E5%AE%89%E8%A3%85-F48771)
+![License](https://img.shields.io/badge/License-GPL--3.0-blue)
 
 **一个单脚本、免安装的串口调试终端**：收发日志、HEX⇄文本互转、三种协议实时波形（FireWater / JustFloat / RawData）、日志查找与时间戳定位、文件发送、命令历史，并带一套插件框架——内置 **Modbus RTU 主站调试台**（事务 + 实时 Watch）与频谱仪。面向 RK3562 / STM32 等嵌入式联调，双击即用。
 
@@ -58,7 +59,7 @@
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File .\serial_terminal_v6.ps1
 ```
 
-> Windows 10/11 自带的 Windows PowerShell 5.1 直接可跑，无需安装任何东西；PowerShell 7 也可以。
+> Windows 10/11 自带的 Windows PowerShell 5.1 直接可跑，无需安装任何东西；PowerShell 7（pwsh）暂不支持，详见下方「已知限制」。
 
 ## ⌨️ 快捷键
 
@@ -101,8 +102,18 @@ serialscope/
   README_V5.md / AI_INTERFACE.md   V5 行为冻结项与 AI 控制通道接口
 ```
 
+## ⚠️ 已知限制
+
+- **建议在显示缩放 100% 的设置下运行**：界面为像素级布局，125% / 150% 缩放下 Windows 会对窗口位图拉伸（能用但发虚，个别控件可能轻微错位）
+- 仅支持 **Windows PowerShell 5.1**（Win10/11 系统自带，启动器已自动选用）；PowerShell 7（pwsh）因 .NET 的 System.Drawing 程序集引用差异暂不可用
+- RX/TX 日志区滚动条为 Win32 原生绘制，深色主题下仍呈亮色（Windows 限制，非自绘可覆盖范围）
+
 ## 📄 更多文档
 
 - [README_V6.md](README_V6.md) — 架构、模块地图、模块开发三条红线、已知取舍
 - [docs/插件接入指南.md](docs/插件接入指南.md) — 插件合同与接入步骤
 - [AI_INTERFACE.md](AI_INTERFACE.md) — AI 控制通道（TCP 9101 JSON 行协议）
+
+## 📃 许可证
+
+以 [GPL-3.0](LICENSE) 发布：可自由使用、修改与再分发，衍生作品须同样以 GPL-3.0 开源。
