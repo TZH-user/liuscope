@@ -851,6 +851,7 @@ $script:rx_line_total = [long]0
 $script:ui_skip_total = [long]0
 # 应用版本（与 GitHub Release tag 对齐比较；master 上的开发版先标 1.1.0）
 $script:app_version = '1.1.0'
+$script:update_check_timer = $null
 $script:connected_port_name = ''
 $script:connected_baud_rate = 0
 $script:max_textbox_chars = 1200000
@@ -2728,6 +2729,31 @@ function show_help_dialog {
 
 $button_help.Add_Click({ show_help_dialog })
 
+function run_startup_update_check {
+    # 启动自动检查的 tick 主体（独立顶层函数，回归测试可直接调用）。
+    # 内部全兜底：任何异常返回 $false，绝不逃进消息循环。
+    try {
+        if ($script:update_check_timer) {
+            try {
+                $script:update_check_timer.Stop()
+                $script:update_check_timer.Dispose()
+            }
+            catch {
+            }
+            $script:update_check_timer = $null
+        }
+        $r = check_app_update -current_version $script:app_version
+        if ($r.Ok -and $r.HasUpdate) {
+            add_message_entry -direction 'SYS' -text ('发现新版本 {0}（当前 {1}）：帮助 → 检查更新 可前往下载。' -f $r.Latest, $r.Current)
+            flush_pending_display_entries
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
 function capture_window_png {
     # 演示截图：PrintWindow(PW_RENDERFULLCONTENT) 渲染窗口自身像素。
     # 不用 CopyFromScreen——它要求窗口在前台，否则会把屏幕上无关窗口拍进去。
@@ -2790,18 +2816,20 @@ $form.Add_Shown({
     }
     else {
         save_gui_setting -key 'update_last_check' -value ([string][DateTimeOffset]::Now.ToUnixTimeSeconds())
-        $update_timer = New-Object System.Windows.Forms.Timer
-        $update_timer.Interval = 8000
-        $update_timer.Add_Tick({
-            $update_timer.Stop()
-            $update_timer.Dispose()
-            $r = check_app_update -current_version $script:app_version
-            if ($r.Ok -and $r.HasUpdate) {
-                add_message_entry -direction 'SYS' -text ('发现新版本 {0}（当前 {1}）：帮助 → 检查更新 可前往下载。' -f $r.Latest, $r.Current)
-                flush_pending_display_entries
+        # 定时器变量必须挂 $script: —— tick scriptblock 不捕获创建时的局部作用域，
+        # tick 里引用 Add_Shown 的局部变量会在触发时因「变量未设置」崩溃（StrictMode，
+        # 实机 8 秒后弹 JIT 异常对话框；WaveTest 跑得快才没暴露）。tick 主体抽成
+        # 顶层函数，另加兜底 try/catch：更新检查绝不允许把异常抛进消息循环。
+        $script:update_check_timer = New-Object System.Windows.Forms.Timer
+        $script:update_check_timer.Interval = 8000
+        $script:update_check_timer.Add_Tick({
+            try {
+                $null = run_startup_update_check
+            }
+            catch {
             }
         })
-        $update_timer.Start()
+        $script:update_check_timer.Start()
     }
     # 日志区比例：写死 SplitterDistance 在窗口放大后会让 TX 区吃掉全部增量，
     # 这里按当前宽度重算一次 7:3（用户之后仍可手动拖动分隔条）
@@ -3024,6 +3052,11 @@ if ($WaveTest) {
     if (flush_rx_line_if_idle) { throw 'idle flush fired on fresh bytes' }
     $script:rx_line_buffer = ''
     Write-Output 'WAVETEST idle flush OK'
+
+    # 启动更新检查 tick 主体回放：定时器回调曾引用 Add_Shown 局部变量，
+    # tick 触发即「变量未设置」崩溃——此函数必须无异常返回（网络不可达也返回 $true）
+    if (-not (run_startup_update_check)) { throw 'startup update check threw' }
+    Write-Output 'WAVETEST update check OK'
 
     # JustFloat / RawData 协议字节流往返
     $script:wave_protocol = 'JustFloat'
