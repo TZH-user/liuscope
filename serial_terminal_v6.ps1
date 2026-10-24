@@ -849,6 +849,8 @@ $script:pending_log_blocks = New-Object 'System.Collections.Generic.List[string]
 $script:rx_bytes_total = [long]0
 $script:rx_line_total = [long]0
 $script:ui_skip_total = [long]0
+# 应用版本（与 GitHub Release tag 对齐比较；master 上的开发版先标 1.1.0）
+$script:app_version = '1.1.0'
 $script:connected_port_name = ''
 $script:connected_baud_rate = 0
 $script:max_textbox_chars = 1200000
@@ -1559,6 +1561,12 @@ if ($SelfTest) {
     $script:rx_last_byte_at = [datetime]::Now
     assert_wave_test 'idle_flush_holds_fresh' (-not (flush_rx_line_if_idle))
     $script:rx_line_buffer = ''
+
+    # 版本比较（更新检查的纯逻辑核心）：三段数字、v 前缀、缺段补 0、非数字段按 0
+    assert_wave_test 'ver_lt' ((compare_app_versions -left '1.0.9' -right '1.1.0') -eq -1)
+    assert_wave_test 'ver_eq' ((compare_app_versions -left 'v1.1.0' -right '1.1.0') -eq 0)
+    assert_wave_test 'ver_gt' ((compare_app_versions -left '1.2' -right 'v1.1.9') -eq 1)
+    assert_wave_test 'ver_tuple' (((get_version_tuple -version_text 'v2.5') -join '.') -eq '2.5.0')
 
     # 文件发送状态机（假串口）：3 块写满 10000 字节自动收尾；中途停止不再续发
     if (-not ('V6FakeSerialPort' -as [type])) {
@@ -2668,6 +2676,35 @@ function show_help_dialog {
     })
     $dlg.Controls.Add($link_repo)
 
+    $btn_update = New-Object System.Windows.Forms.Button
+    $btn_update.Text = '检查更新'
+    $btn_update.Location = New-Object System.Drawing.Point(496, 552)
+    $btn_update.Size = New-Object System.Drawing.Size(96, 30)
+    $btn_update.Anchor = 'Bottom,Right'
+    $dlg.Controls.Add($btn_update)
+    style_main_button -button $btn_update
+    $btn_update.Add_Click({
+        $btn_update.Enabled = $false
+        $btn_update.Text = '检查中…'
+        [System.Windows.Forms.Application]::DoEvents()
+        $r = check_app_update -current_version $script:app_version
+        $btn_update.Enabled = $true
+        $btn_update.Text = '检查更新'
+        if (-not $r.Ok) {
+            [System.Windows.Forms.MessageBox]::Show(('检查失败（网络/代理不可达）：{0}' -f $r.Note), '检查更新', 'OK', 'Warning') | Out-Null
+            return
+        }
+        if ($r.HasUpdate) {
+            $choice = [System.Windows.Forms.MessageBox]::Show(('当前 {0}，最新 {1}。去下载页？' -f $r.Current, $r.Latest), '发现新版本', 'YesNo', 'Information')
+            if ($choice -eq [System.Windows.Forms.DialogResult]::Yes) {
+                try { [System.Diagnostics.Process]::Start($r.PageUrl) } catch { }
+            }
+        }
+        else {
+            [System.Windows.Forms.MessageBox]::Show(('已是最新（当前 {0}，最新 {1}）' -f $r.Current, $r.Latest), '检查更新', 'OK', 'Information') | Out-Null
+        }
+    })
+
     $btn_close = New-Object System.Windows.Forms.Button
     $btn_close.Text = '关闭'
     $btn_close.Location = New-Object System.Drawing.Point(598, 552)
@@ -2744,6 +2781,28 @@ function inject_demo_log_data {
 
 $form.Add_Shown({
     start_ui_flush_timer
+    # 启动自动检查更新（24h 节流，静默：只在有新版本时给一条 SYS；失败完全无感）
+    $last_check_raw = read_gui_setting -key 'update_last_check'
+    $last_check = [long]0
+    if ([long]::TryParse($last_check_raw, [ref]$last_check) -and
+        (([DateTimeOffset]::Now.ToUnixTimeSeconds() - $last_check) -lt 86400)) {
+        # 24 小时内查过，跳过
+    }
+    else {
+        save_gui_setting -key 'update_last_check' -value ([string][DateTimeOffset]::Now.ToUnixTimeSeconds())
+        $update_timer = New-Object System.Windows.Forms.Timer
+        $update_timer.Interval = 8000
+        $update_timer.Add_Tick({
+            $update_timer.Stop()
+            $update_timer.Dispose()
+            $r = check_app_update -current_version $script:app_version
+            if ($r.Ok -and $r.HasUpdate) {
+                add_message_entry -direction 'SYS' -text ('发现新版本 {0}（当前 {1}）：帮助 → 检查更新 可前往下载。' -f $r.Latest, $r.Current)
+                flush_pending_display_entries
+            }
+        })
+        $update_timer.Start()
+    }
     # 日志区比例：写死 SplitterDistance 在窗口放大后会让 TX 区吃掉全部增量，
     # 这里按当前宽度重算一次 7:3（用户之后仍可手动拖动分隔条）
     if ($split_logs.Width -gt 0) {

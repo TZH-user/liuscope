@@ -319,6 +319,91 @@ function save_gui_setting {
     }
 }
 
+function read_gui_setting {
+    param([string]$key)
+
+    try {
+        $path = get_gui_settings_path
+        if (-not (Test-Path -LiteralPath $path)) {
+            return ''
+        }
+        $hit = Get-Content -LiteralPath $path -Encoding UTF8 |
+            Where-Object { $_ -match ('^\s*' + [regex]::Escape($key) + '\s*=(.*)$') } |
+            Select-Object -First 1
+        if ($hit -match '^\s*[^\s=]+\s*=(.*)$') {
+            return ([string]$Matches[1]).Trim()
+        }
+    }
+    catch {
+    }
+    return ''
+}
+
+# ---------- 版本比较与更新检查（GitHub Releases） ----------
+
+function get_version_tuple {
+    # 'v1.2.10' / '1.2.10' → @(1,2,10)；非数字段按 0 处理
+    param([string]$version_text)
+
+    $nums = @()
+    foreach ($part in ((([string]$version_text).Trim() -replace '^v', '') -split '\.')) {
+        $m = [regex]::Match($part, '\d+')
+        if ($m.Success) {
+            $nums += [int]$m.Value
+        }
+        else {
+            $nums += 0
+        }
+    }
+    while ($nums.Count -lt 3) {
+        $nums += 0
+    }
+    return [int[]]($nums | Select-Object -First 3)
+}
+
+function compare_app_versions {
+    # 返回 -1（left < right）/ 0（相等）/ 1（left > right）
+    param([string]$left, [string]$right)
+
+    $a = get_version_tuple -version_text $left
+    $b = get_version_tuple -version_text $right
+    for ($i = 0; $i -lt 3; $i++) {
+        if ($a[$i] -lt $b[$i]) { return -1 }
+        if ($a[$i] -gt $b[$i]) { return 1 }
+    }
+    return 0
+}
+
+function check_app_update {
+    # 查 GitHub 最新 Release 并与当前版本比较。网络失败不抛——调用方只看 Ok 字段。
+    # 返回 @{ Ok; HasUpdate; Current; Latest; PageUrl; Note }
+    param([string]$current_version)
+
+    $result = @{
+        Ok = $false
+        HasUpdate = $false
+        Current = $current_version
+        Latest = ''
+        PageUrl = 'https://github.com/TZH-user/serialscope/releases/latest'
+        Note = ''
+    }
+    try {
+        # PS5.1 默认 TLS1.0，GitHub 要求 TLS1.2+
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/TZH-user/serialscope/releases/latest' -TimeoutSec 10 -ErrorAction Stop
+        $result.Latest = [string]$release.tag_name
+        if ((compare_app_versions -left $current_version -right $result.Latest) -lt 0) {
+            $result.HasUpdate = $true
+            $result.Note = [string]$release.body
+        }
+        $result.Ok = $true
+    }
+    catch {
+        $result.Note = $_.Exception.Message
+    }
+    return $result
+}
+
 function ensure_log_path {
     if (-not $script:log_file_path) {
         $log_dir = Join-Path -Path $script:app_root -ChildPath 'logs'
