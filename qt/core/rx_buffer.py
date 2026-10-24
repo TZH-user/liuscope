@@ -36,6 +36,13 @@ class RxBuffer:
         tail, self._buf = self._buf, ''
         return tail
 
+    def drain(self) -> str | None:
+        """无条件吐出残行（切显示格式等场景），没有则返回 None。"""
+        if not self._buf:
+            return None
+        tail, self._buf = self._buf, ''
+        return tail
+
     @property
     def backlog_bytes(self) -> int:
         return len(self._buf.encode('utf-8', errors='replace'))

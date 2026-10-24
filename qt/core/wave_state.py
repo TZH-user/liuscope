@@ -254,6 +254,13 @@ class WaveState:
             self.reset_buffers()
             self.reset_decoder()
 
+    # ---------- 积压口径 ----------
+
+    @property
+    def backlog_bytes(self) -> int:
+        """未解析完的字节：FireWater 行缓冲 + JustFloat 残尾（与主线口径一致）。"""
+        return len(self.line_buffer.encode('utf-8', errors='replace')) + len(self.jf_buffer)
+
     # ---------- 提示 ----------
 
     def _note_overflow(self, detail: str):

@@ -51,7 +51,7 @@ def test_main_window():
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     win = MainWindow()
     win.show()
-
+    win.wave.state.enabled = False  # 本测试只看终端管线，波形侧不参与积压
     win.ingest_bytes(b'boot v1.0\n')
     win.ingest_bytes(b'temp=41.5\n')
     win.ingest_bytes(b'no_newline_tail')
@@ -252,13 +252,134 @@ def test_wave_window():
     print('WAVE WINDOW OK')
 
 
+def test_hexutil():
+    from core.hexutil import bytes_to_hex_text, try_parse_hex_text
+
+    assert bytes_to_hex_text(b'\xDE\xAD\x01') == 'DE AD 01'
+    assert bytes_to_hex_text(b'') == ''
+    assert try_parse_hex_text('DE AD 01') == b'\xde\xad\x01'
+    assert try_parse_hex_text('de,ad;be:ef') == b'\xde\xad\xbe\xef'
+    assert try_parse_hex_text('0xDE 0x0A') == b'\xde\x0a'
+    assert try_parse_hex_text('0X2 A') == b'\x02\n'  # 0X 大小写不敏感、单 token 1~2 位
+    assert try_parse_hex_text('  ') == b''
+    try:
+        try_parse_hex_text('GG')
+        raise AssertionError('GG 应当抛 ValueError')
+    except ValueError as exc:
+        assert 'HEX 输入无效: GG' in str(exc)
+    print('HEXUTIL OK')
+
+
+def test_main_window_m3():
+    """M3 端到端：HEX 收发 / 换行模式 / 发送历史 / 文件发送状态机 / 查找条。"""
+    from PySide6 import QtWidgets
+
+    from ui.main_window import MainWindow
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
+
+    # HEX 接收：按块落显，残行先落显
+    win.combo_rx_format.setCurrentText('HEX')
+    win.ingest_bytes(b'\xde\xad\xbe\xef')
+    assert 'RX DE AD BE EF' in win.log.toPlainText()
+    # 切回 ASCII：HEX 模式下没进行缓冲，积压为 0
+    win.combo_rx_format.setCurrentText('ASCII')
+    assert win.buffer.backlog_bytes == 0
+
+    # HEX 发送：未连接仅入日志；非法输入置状态不发送
+    win.combo_tx_format.setCurrentText('HEX')
+    win.edit_send.setText('01 0x2, A')
+    win.send()
+    assert 'TX 01 02 0A' in win.log.toPlainText()
+    win.edit_send.setText('GG')
+    win.send()
+    assert 'HEX 输入无效: GG' in win.lbl_status.text()
+
+    # ASCII 发送 + 换行模式：展示层 <CR>/<LF> 可视化
+    win.combo_tx_format.setCurrentText('ASCII')
+    win.combo_newline.setCurrentText('CRLF')
+    win.edit_send.setText('AT+RST')
+    win.send()
+    assert 'TX AT+RST<CR><LF>' in win.log.toPlainText()
+
+    # 发送历史：⬆ 回翻、⬇ 走到底恢复草稿、连续重复不入栈
+    win.edit_send.setText('draft-x')
+    win.edit_send.recall(-1)
+    assert win.edit_send.text() == 'AT+RST', '⬆ 应取最近一条历史'
+    win.edit_send.recall(+1)
+    assert win.edit_send.text() == 'draft-x', '⬇ 走到底应恢复草稿'
+    before = len(win.edit_send._history)
+    win.edit_send.push_history('HIST-UNIQUE-1')
+    win.edit_send.push_history('HIST-UNIQUE-1')
+    assert len(win.edit_send._history) == before + 1, '连续重复只入栈一次'
+
+    # 文件发送状态机：假 worker 4KiB 分块，20ms 定时器驱到完成
+    sent = bytearray()
+
+    class FakeWorker:
+        def write_bytes(self, data: bytes) -> bool:
+            sent.extend(data)
+            return True
+
+    win.worker = FakeWorker()
+    import tempfile
+    import os
+    payload = bytes(range(256)) * 40  # 10240 字节 → 3 块（4096+4096+2048）
+    fd, path = tempfile.mkstemp(suffix='.bin')
+    os.write(fd, payload)
+    os.close(fd)
+    try:
+        win._file_send = {'name': 't.bin', 'bytes': payload, 'pos': 0}
+        win.btn_file.setText('停止')
+        win.file_timer.start()
+        for _ in range(10):
+            win._file_send_tick()
+            if win._file_send is None:
+                break
+        assert bytes(sent) == payload, '文件必须原样字节流发完'
+        assert win._file_send is None
+        assert '文件发送完成: t.bin' in win.lbl_status.text()
+
+        # 中途停止：已发字节如实入账
+        win.worker = FakeWorker()
+        win._file_send = {'name': 't2.bin', 'bytes': payload, 'pos': 0}
+        win._file_send_tick()
+        assert win._file_send['pos'] == 4096
+        win._stop_file_send('手动停止')
+        assert win._file_send is None
+        assert '[文件发送中断] t2.bin: 手动停止（已发 4096 / 10240 字节）' in win.log.toPlainText()
+        assert win.btn_file.text() == '文件发送'
+    finally:
+        os.unlink(path)
+
+    # 查找条：实时高亮 + 计数 + 循环跳转
+    win.find_bar.open_and_focus()
+    win.find_bar.edit_find.setText('AT+RST')
+    assert win.find_bar.lbl_count.text().startswith('第 1/')
+    total = int(win.find_bar.lbl_count.text().split('/')[1].split(' ')[0])
+    win.find_bar.navigate(+1)
+    assert win.find_bar.lbl_count.text() == f'第 {2 if total > 1 else 1}/{total} 处'
+    win.find_bar.navigate(-1)
+    assert win.find_bar.lbl_count.text() == f'第 1/{total} 处'
+    win.find_bar.hide_and_clear()
+    assert not win.log.extraSelections(), '关闭查找条应清掉高亮'
+
+    win.worker = None
+    win.close()
+    print('MAINWINDOW M3 OK')
+
+
 def run_selftest() -> int:
     import os
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     test_rx_buffer()
+    test_hexutil()
     test_main_window()
     test_wave_protocols()
     test_wave_window()
+    test_main_window_m3()
     print('QT_SPIKE_SELFTEST_OK')
     return 0
 

@@ -49,14 +49,17 @@ class SerialWorker(QtCore.QThread):
                     self.lost.emit(str(exc))
                 break
 
-    def write_line(self, text: str) -> bool:
+    def write_bytes(self, data: bytes) -> bool:
         if not self._port:
             return False
         try:
-            self._port.write((text + '\n').encode('utf-8'))
+            self._port.write(data)
             return True
         except Exception:
             return False
+
+    def write_line(self, text: str) -> bool:
+        return self.write_bytes((text + '\n').encode('utf-8'))
 
     def stop(self):
         self._running = False

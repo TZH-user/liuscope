@@ -1,11 +1,18 @@
 # -*- coding: utf-8 -*-
-"""主窗体：M1 闭环 = 连接/断开 + RX/TX 日志（着色）+ 行缓冲/空闲落显/积压常显 + 发送。"""
+"""主窗体：连接/断开 + RX/TX 日志（ASCII/HEX 双格式）+ 行缓冲/空闲落显/积压常显
++ 发送（HEX/换行模式/历史回翻）+ 文件发送（分块定时）+ 查找条 + 波形页签。
+
+M3 复刻主线功能口径：
+- HEX 发送解析同主线（0x 前缀可带、空白/逗号/分号/冒号/连字符分隔、非法 token 报错）
+- 换行模式 无/LF/CR/CRLF，ASCII 与 HEX 发送都追加
+- 文件发送 4 KiB/20ms 分块（≈200 KiB/s 上限），发送中再点 = 停止
+"""
 from __future__ import annotations
 
 import html
 import time
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 try:
     from serial.tools import list_ports
@@ -13,10 +20,19 @@ except ImportError:
     list_ports = None
 
 from core import APP_NAME, APP_VERSION, REPO_URL
+from core.hexutil import bytes_to_hex_text, try_parse_hex_text
 from core.rx_buffer import RxBuffer
 from core.serial_worker import SerialWorker
+from ui.find_bar import FindBar
+from ui.history_edit import HistoryLineEdit
 from ui.theme import RX_COLOR, SYS_COLOR, TIME_COLOR, TX_COLOR
 from ui.wave_window import WaveWindow
+
+NEWLINE_TEXT = {'无': '', 'LF': '\n', 'CR': '\r', 'CRLF': '\r\n'}
+NEWLINE_BYTES = {'无': b'', 'LF': b'\n', 'CR': b'\r', 'CRLF': b'\r\n'}
+
+FILE_CHUNK = 4096   # 4 KiB/20ms ≈ 上限 200 KiB/s（对齐主线）
+FILE_INTERVAL_MS = 20
 
 
 def _stamp() -> str:
@@ -34,6 +50,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.buffer = RxBuffer()
         self.worker: SerialWorker | None = None
         self._max_log_blocks = 20000
+        self._file_send: dict | None = None
 
         # ---- 顶部连接行 ----
         self.combo_port = QtWidgets.QComboBox()
@@ -56,29 +73,61 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(self.btn_connect)
         top.addWidget(self.lbl_status, 2)
 
-        # ---- 日志区 ----
+        # ---- 日志区 + 查找条 ----
         self.log = QtWidgets.QTextEdit()
         self.log.setReadOnly(True)
         self.log.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
+        self.find_bar = FindBar(self.log)
+        self.find_bar.setVisible(False)
 
         # ---- 底部发送行 ----
-        self.edit_send = QtWidgets.QLineEdit()
-        self.edit_send.setPlaceholderText('输入要发送的内容，Enter 发送')
+        self.combo_rx_format = QtWidgets.QComboBox()
+        self.combo_rx_format.addItems(['ASCII', 'HEX'])
+        self.combo_rx_format.setToolTip('接收显示格式；切到 HEX 时未成行的残行立即落显')
+        self.combo_rx_format.currentTextChanged.connect(self._on_rx_format_changed)
+
+        self.combo_tx_format = QtWidgets.QComboBox()
+        self.combo_tx_format.addItems(['ASCII', 'HEX'])
+
+        self.combo_newline = QtWidgets.QComboBox()
+        self.combo_newline.addItems(['无', 'LF', 'CR', 'CRLF'])
+        self.combo_newline.setCurrentText('LF')
+
+        self.edit_send = HistoryLineEdit()
+        self.edit_send.setPlaceholderText('输入要发送的内容，Enter 发送，⬆/⬇ 回翻历史')
         self.edit_send.returnPressed.connect(self.send)
         self.btn_send = QtWidgets.QPushButton('发送')
         self.btn_send.clicked.connect(self.send)
+
+        self.btn_find = QtWidgets.QPushButton('查找')
+        self.btn_find.setObjectName('tool')
+        self.btn_find.clicked.connect(self.find_bar.open_and_focus)
+
+        self.btn_file = QtWidgets.QPushButton('文件发送')
+        self.btn_file.setObjectName('tool')
+        self.btn_file.clicked.connect(self.toggle_file_send)
+
         self.lbl_backlog = QtWidgets.QLabel('积压 0 B')
         self.lbl_backlog.setObjectName('backlog')
 
         bottom = QtWidgets.QHBoxLayout()
+        bottom.addWidget(QtWidgets.QLabel('收'))
+        bottom.addWidget(self.combo_rx_format)
+        bottom.addWidget(QtWidgets.QLabel('发'))
+        bottom.addWidget(self.combo_tx_format)
+        bottom.addWidget(QtWidgets.QLabel('换行'))
+        bottom.addWidget(self.combo_newline)
         bottom.addWidget(self.edit_send, 3)
         bottom.addWidget(self.btn_send)
+        bottom.addWidget(self.btn_find)
+        bottom.addWidget(self.btn_file)
         bottom.addWidget(self.lbl_backlog, 1)
 
         terminal = QtWidgets.QWidget()
         terminal_layout = QtWidgets.QVBoxLayout(terminal)
         terminal_layout.setContentsMargins(0, 0, 0, 0)
         terminal_layout.addLayout(top)
+        terminal_layout.addWidget(self.find_bar)
         terminal_layout.addWidget(self.log, 1)
         terminal_layout.addLayout(bottom)
 
@@ -90,9 +139,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.setObjectName('main_tabs')
         self.setCentralWidget(self.tabs)
 
+        find_shortcut = QtGui.QShortcut(QtGui.QKeySequence('Ctrl+F'), terminal)
+        find_shortcut.activated.connect(self.find_bar.open_and_focus)
+
         self.flush_timer = QtCore.QTimer(self)
         self.flush_timer.timeout.connect(self.on_flush_tick)
         self.flush_timer.start(self.FLUSH_INTERVAL_MS)
+
+        self.file_timer = QtCore.QTimer(self)
+        self.file_timer.timeout.connect(self._file_send_tick)
+        self.file_timer.setInterval(FILE_INTERVAL_MS)
+
         self.refresh_ports()
 
     # ---------- 串口 ----------
@@ -121,7 +178,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.open_failed.connect(lambda msg: (self._teardown_worker(),
                                                      self.set_status(f'打开失败: {msg}', 'status_err')))
         self.worker.lost.connect(lambda msg: (self._teardown_worker(),
-                                              self.set_status(f'连接丢失: {msg}', 'status_err')))
+                                              self.set_status(f'连接丢失: {msg}', 'status_err'),
+                                              self._stop_file_send('串口已断开')))
         self.worker.opened.connect(lambda: self.set_status(f'已连接 {device} @ {baud}', 'status_ok'))
         self.worker.start()
 
@@ -140,6 +198,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802 (Qt 命名)
         self.wave.stop_timers()
+        self._stop_file_send('窗口关闭')
         self._teardown_worker()
         super().closeEvent(event)
 
@@ -147,8 +206,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def ingest_bytes(self, data: bytes):
         now = time.monotonic()
-        for line in self.buffer.feed(data, now):
-            self._append_log('RX', line)
+        if self.combo_rx_format.currentText() == 'HEX':
+            # 对齐主线：HEX 显示模式按到达块直接落显；先清掉未成行的文本残行
+            tail = self.buffer.drain()
+            if tail:
+                self._append_log('RX', f'{tail} (格式切换落显)')
+            self._append_log('RX', bytes_to_hex_text(data))
+        else:
+            for line in self.buffer.feed(data, now):
+                self._append_log('RX', line)
         self.wave.consume_bytes(data)
         self._update_backlog()
 
@@ -159,8 +225,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self._append_log('RX', f'{tail} (空闲落显)')
         self._update_backlog()
 
+    def _on_rx_format_changed(self, _text: str):
+        # 切格式时把残行落到日志，避免"看起来丢了"
+        tail = self.buffer.drain()
+        if tail:
+            self._append_log('RX', f'{tail} (格式切换落显)')
+        self._update_backlog()
+
     def _update_backlog(self):
-        self.lbl_backlog.setText(f'积压 {self.buffer.backlog_bytes} B')
+        total = self.buffer.backlog_bytes + self.wave.state.backlog_bytes
+        self.lbl_backlog.setText(f'积压 {total} B')
 
     # ---------- 日志 / 发送 ----------
 
@@ -180,9 +254,102 @@ class MainWindow(QtWidgets.QMainWindow):
             cursor.removeSelectedText()
 
     def send(self):
-        text = self.edit_send.text().strip()
-        if not text:
+        raw = self.edit_send.text()
+        if not raw:
             return
-        sent = bool(self.worker and self.worker.write_line(text))
-        self._append_log('TX', text + ('' if sent else '  (未连接，仅入日志)'))
+        newline_mode = self.combo_newline.currentText()
+        payload_bytes, display_text = self._build_tx_payload(raw, newline_mode)
+        if not payload_bytes:
+            return
+        sent = bool(self.worker and self.worker.write_bytes(payload_bytes))
+        suffix = '' if sent else '  (未连接，仅入日志)'
+        self._append_log('TX', display_text + suffix)
+        self.edit_send.push_history(raw)
         self.edit_send.clear()
+
+    def _build_tx_payload(self, raw: str, newline_mode: str):
+        """按发送格式组包。返回 (bytes, 展示文本)；无效 HEX 返回 (b'', 错误文本)。"""
+        if self.combo_tx_format.currentText() == 'HEX':
+            try:
+                payload = try_parse_hex_text(raw)
+            except ValueError as exc:
+                self.set_status(str(exc), 'status_err')
+                return b'', ''
+            payload += NEWLINE_BYTES.get(newline_mode, b'')
+            if not payload:
+                return b'', ''
+            return payload, bytes_to_hex_text(payload)
+        payload_text = raw + NEWLINE_TEXT.get(newline_mode, '')
+        if not payload_text:
+            return b'', ''
+        # 主线 TX 展示：换行可视化（<CR>/<LF>）
+        return payload_text.encode('utf-8'), \
+            payload_text.replace('\r', '<CR>').replace('\n', '<LF>')
+
+    # ---------- 文件发送（分块定时器，UI 不卡死；发送中再点 = 停止） ----------
+
+    def toggle_file_send(self):
+        if self._file_send:
+            self._stop_file_send('手动停止')
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, '选择要发送的文件')
+        if not path:
+            return
+        try:
+            with open(path, 'rb') as f:
+                data = f.read()
+        except OSError as exc:
+            self.set_status(f'文件读取失败: {exc}', 'status_err')
+            return
+        if not data:
+            self.set_status('文件为空，没有可发送的内容。', 'status_err')
+            return
+        if not self.worker:
+            self.set_status('串口未连接。', 'status_err')
+            return
+        name = path.replace('\\', '/').rsplit('/', 1)[-1]
+        self._file_send = {'name': name, 'bytes': data, 'pos': 0}
+        self.btn_file.setText('停止')
+        self._append_log('TX', f'[文件发送] {name}（{len(data)} 字节，原样字节流）')
+        self.file_timer.start()
+
+    def _file_send_tick(self):
+        state = self._file_send
+        if not state:
+            self.file_timer.stop()
+            return
+        if not self.worker:
+            self._stop_file_send('串口已断开')
+            return
+        data = state['bytes']
+        chunk = data[state['pos']:state['pos'] + FILE_CHUNK]
+        try:
+            ok = self.worker.write_bytes(chunk)
+        except Exception as exc:  # pragma: no cover - 真实串口路径
+            self._stop_file_send(f'写入失败: {exc}')
+            self.set_status(f'文件发送失败: {exc}', 'status_err')
+            return
+        if not ok:
+            self._stop_file_send('写入失败: 串口未打开')
+            return
+        state['pos'] += len(chunk)
+        if state['pos'] >= len(data):
+            self._stop_file_send('完成')
+            self.set_status(f"文件发送完成: {state['name']}（{len(data)} 字节）", 'status_ok')
+        else:
+            self.set_status(
+                f"文件发送中 {state['name']}: {state['pos'] / 1024:.1f} / {len(data) / 1024:.1f} KiB",
+                'status_ok')
+
+    def _stop_file_send(self, reason: str):
+        state = self._file_send
+        if not state:
+            return
+        self._file_send = None
+        self.file_timer.stop()
+        self.btn_file.setText('文件发送')
+        if reason != '完成':
+            self._append_log(
+                'SYS',
+                f"[文件发送中断] {state['name']}: {reason}"
+                f"（已发 {state['pos']} / {len(state['bytes'])} 字节）")
