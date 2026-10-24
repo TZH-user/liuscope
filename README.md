@@ -1,4 +1,4 @@
-# serialscope · RK3562 串口收发工具 V6
+﻿# serialscope · RK3562 串口收发工具 V6
 
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-blue)
 ![PowerShell](https://img.shields.io/badge/PowerShell-WinPS%205.1-5391FE)
@@ -42,7 +42,7 @@
 - 无设备时「模拟数据源」一键验证整条链路
 - **缓冲积压监控**：协议格式或波特率不匹配时，状态条实时显示未解析字节「积压 N B」的增长并变色（黄 → 红），日志区给节流的失步提示——这是「波特率不对/格式不对」最早的信号
 
-### Modbus RTU 插件（波形窗口 → 插件区 → Modbus）
+### Modbus RTU 插件（波形窗口 → 「Modbus」页签）
 - **事务页（静态手动）**：功能码 01/02/03/04/05/06/0F/10；CRC16 自动生成与响应校验；异常码（01~0B）中文说明；寄存器解码 HEX / 十进制 / 有符号 / float32(ABCD / CDAB)；地址与数值支持十进制和 `0x` 十六进制；可轮询；每次事务回写主日志（Ctrl+F 可检索）
 - **实时监视页（动态 Watch）**：把读地址加入 Watch 表，按 **键 = 从站:功能码:起始地址** 匹配原位更新；轮询引擎把同 (从站, 功能码) 的项**合并成一次读请求**（近邻间隙 ≤4 合并，单次上限 125 寄存器 / 2000 线圈），响应按地址偏移切回各行；数值变化闪色（涨绿 / 跌红 / 其余琥珀）；**双击行回填事务区**改参数或下发写入
 - 删除 `plugins\modbus_rtu\` 目录即完全移除，宿主零改动
@@ -73,7 +73,7 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File .\serial_te
 
 ## 🧩 插件框架
 
-波形窗口的「插件」区动态装载 `plugins\*\plugin.ps1`：插件通过 `Register-WavePlugin` 注册入口，崩溃只禁用自身、绝不拖垮宿主；随包带 **Modbus RTU**、**频谱仪** 两个成品插件和 `_template` 开发模板。接入方法与自检清单见 [docs/插件接入指南.md](docs/插件接入指南.md)。
+波形窗口把 `plugins\*\plugin.ps1` 注册的每个插件装成一页页签（`[波形] [Modbus] [频谱] …`，首个切入才构建内容，插件崩溃只移除自己的页签、绝不拖垮宿主）；随包带 **Modbus RTU**、**频谱仪** 两个成品插件和 `_template` 开发模板。接入方法与自检清单见 [docs/插件接入指南.md](docs/插件接入指南.md)。
 
 ## 🧪 自检与测试
 

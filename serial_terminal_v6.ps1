@@ -2539,7 +2539,7 @@ $tooltip_main = New-Object System.Windows.Forms.ToolTip
 $tooltip_main.SetToolTip($button_send_file, '选择文件按原样字节流分块发送（大文件不卡界面）；发送中再点一次停止。换行/HEX 设置对文件发送不生效')
 
 # 主窗体控件提示：悬停即知功能；全文索引在「帮助」按钮的《功能速览》里
-$tooltip_main.SetToolTip($button_wave, '打开波形窗口：FireWater / JustFloat / RawData 实时曲线、频谱、XY 相位图（IQ 星座）；插件区可开 Modbus RTU 调试台')
+$tooltip_main.SetToolTip($button_wave, '打开波形窗口：FireWater / JustFloat / RawData 实时曲线、频谱、XY 相位图（IQ 星座）；Modbus RTU 调试台与频谱仪都在页签里')
 $tooltip_main.SetToolTip($button_help, '功能速览：全部功能点与快捷键一览')
 $tooltip_main.SetToolTip($button_connect, '按当前参数打开串口并开始接收')
 $tooltip_main.SetToolTip($button_refresh, '重新扫描系统串口；勾选「新设备自动连接」后插入设备即自动连上')
@@ -2585,7 +2585,7 @@ function show_help_dialog {
         '  • 无设备时点「模拟数据源」验证整条链路；曲线可导出 PNG / CSV / TXT',
         '  • 协议格式或波特率不匹配时，状态条显示缓冲「积压」增长并变色提醒（黄→红）',
         '',
-        '【Modbus RTU 插件】（波形窗口 → 插件区 → Modbus）',
+        '【Modbus RTU 插件】（波形窗口 → 「Modbus」页签，无需另开窗口）',
         '  • 事务页：功能码 01/02/03/04/05/06/0F/10，CRC16 自动生成与校验，异常码中文说明，',
         '    寄存器解码支持 HEX / 十进制 / 有符号 / float32(ABCD / CDAB)',
         '  • 实时监视页：把读地址加入 Watch 表，合并轮询，数值变化闪色（涨绿 / 跌红），双击行回填事务区',
@@ -2813,8 +2813,19 @@ $form.Add_Shown({
 
                         if (-not (Get-Command show_modbus_panel -ErrorAction SilentlyContinue)) {
                             . (Join-Path $script:app_root 'plugins\modbus_rtu\plugin.ps1')
+                            load_wave_plugins
                         }
-                        show_modbus_panel
+                        # 页签模式：切入「Modbus」页（懒构建），预填 Watch 表后抓波形窗口整窗
+                        $modbus_tab_index = -1
+                        for ($ti = 0; $ti -lt $script:wave_tabs.Controls.Count; $ti++) {
+                            if ($script:wave_tabs.Controls[$ti].Text -eq 'Modbus') { $modbus_tab_index = $ti; break }
+                        }
+                        if ($modbus_tab_index -lt 0) { throw 'demo: Modbus tab not found' }
+                        $script:wave_tabs.SelectedIndex = $modbus_tab_index
+                        for ($k = 0; $k -lt 10; $k++) {
+                            [System.Windows.Forms.Application]::DoEvents()
+                            Start-Sleep -Milliseconds 40
+                        }
                         $demo_watch = @(
                             @{ Name = '温度传感'; Slave = 1; Fc = 3; Start = 0; Count = 2; Decode = '十进制'; LastValue = '41.5, 3.91'; LastStatus = 'OK' },
                             @{ Name = 'CPU 负载'; Slave = 1; Fc = 3; Start = 10; Count = 1; Decode = '十进制'; LastValue = '23'; LastStatus = 'OK' },
@@ -2838,10 +2849,8 @@ $form.Add_Shown({
                         $script:modbus_tab_ctrl.SelectedIndex = 1
                         [System.Windows.Forms.Application]::DoEvents()
                         Start-Sleep -Milliseconds 400
-                        capture_window_png -win $script:modbus_form -path ([System.IO.Path]::ChangeExtension($script:shot_target, '.modbus.png'))
-                        if ($script:modbus_form -and -not $script:modbus_form.IsDisposed) {
-                            $script:modbus_form.Close()
-                        }
+                        capture_window_png -win $script:wave_form -path ([System.IO.Path]::ChangeExtension($script:shot_target, '.modbus.png'))
+                        $script:wave_tabs.SelectedIndex = 0
                     }
                     catch {
                         Write-Output ('DEMO_FAIL {0}' -f $_.Exception.Message)
@@ -3127,10 +3136,12 @@ if ($WaveTest) {
         exit 1
     }
 
-    # 插件加载与滤波切换
-    $plugin_btn_found = $false
-    foreach ($ctrl in $script:wave_plugin_flow.Controls) {
-        if ($ctrl.Text -eq '频谱') { $plugin_btn_found = $true; break }
+    # 插件页签化与滤波切换
+    $plugin_tab_found = $false
+    if ($script:wave_tabs -and -not $script:wave_tabs.IsDisposed) {
+        foreach ($page in $script:wave_tabs.Controls) {
+            if ($page.Text -eq '频谱') { $plugin_tab_found = $true; break }
+        }
     }
     $filter_ok = ($script:wcombo_filter.SelectedItem -eq '关' -and $script:wave_filter_mode -eq '关')
     $script:wcombo_filter.SelectedItem = '滑动平均'
@@ -3142,8 +3153,8 @@ if ($WaveTest) {
         $filter_ok = $filter_ok -and ($script:wave_filter_cache.ContainsKey(0))
     }
     $script:wcombo_filter.SelectedItem = '关'
-    if (-not ($plugin_btn_found -and $filter_ok)) {
-        Write-Output ('WAVETEST_FAIL plugin_or_filter (plugin_btn={0} filter_ok={1})' -f $plugin_btn_found, $filter_ok)
+    if (-not ($plugin_tab_found -and $filter_ok)) {
+        Write-Output ('WAVETEST_FAIL plugin_or_filter (plugin_tab={0} filter_ok={1})' -f $plugin_tab_found, $filter_ok)
         if ($script:wave_form) { $script:wave_form.Close() }
         $form.Close()
         exit 1

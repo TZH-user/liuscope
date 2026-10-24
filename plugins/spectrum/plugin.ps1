@@ -23,19 +23,38 @@ $script:spectrum_form = $null
 $script:spectrum_state = $null
 
 function show_spectrum_panel {
-    if ($script:spectrum_form -and -not $script:spectrum_form.IsDisposed) {
+    # 合同 v2：传入 $container（波形窗口的插件页签）时内容长在页签里；不传则退回独立窗口
+    param([System.Windows.Forms.Control]$container = $null)
+
+    if ($container) {
+        if ($script:spectrum_form -and -not $script:spectrum_form.IsDisposed) {
+            return
+        }
+    }
+    elseif ($script:spectrum_form -and -not $script:spectrum_form.IsDisposed) {
         $script:spectrum_form.Show()
         $script:spectrum_form.Activate()
         return
     }
 
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = '频谱仪 — 插件'
-    $form.StartPosition = 'CenterParent'
-    $form.Size = New-Object System.Drawing.Size(980, 660)
-    $form.MinimumSize = New-Object System.Drawing.Size(760, 480)
-    $form.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 33)
-    $form.Font = new_font -name 'Microsoft YaHei UI' -size 9
+    $form = $null
+    if ($container) {
+        $host_root = New-Object System.Windows.Forms.Panel
+        $host_root.Dock = 'Fill'
+        $host_root.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 33)
+        $host_root.Font = new_font -name 'Microsoft YaHei UI' -size 9
+        [void]$container.Controls.Add($host_root)
+    }
+    else {
+        $form = New-Object System.Windows.Forms.Form
+        $host_root = $form
+        $host_root.Text = '频谱仪 — 插件'
+        $host_root.StartPosition = 'CenterParent'
+        $host_root.Size = New-Object System.Drawing.Size(980, 660)
+        $host_root.MinimumSize = New-Object System.Drawing.Size(760, 480)
+        $host_root.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 33)
+        $host_root.Font = new_font -name 'Microsoft YaHei UI' -size 9
+    }
 
     # ---- 顶部参数条 ----
     $toolbar = New-Object System.Windows.Forms.Panel
@@ -221,8 +240,8 @@ function show_spectrum_panel {
     }
     $split.Panel2.Controls.Add($wf_panel)
 
-    $form.Controls.Add($split)
-    $form.Controls.Add($toolbar)
+    $host_root.Controls.Add($split)
+    $host_root.Controls.Add($toolbar)
 
     # ---- 状态（全部经 $script:spectrum_state，handler 只访问它）----
     $script:spectrum_state = @{
@@ -307,7 +326,8 @@ function show_spectrum_panel {
         }
     })
     $refresh_timer.Start()
-    $form.Add_FormClosing({
+    # 随内容根控件销毁清理（页签模式 = 波形窗口关闭；独立窗口模式 = 窗体关闭）
+    $host_root.Add_Disposed({
         try {
             $refresh_timer.Stop()
             $refresh_timer.Dispose()
@@ -318,6 +338,7 @@ function show_spectrum_panel {
             try { $script:spectrum_state.SceneBmp.Dispose() } catch { }
         }
         $script:spectrum_state = $null
+        $script:spectrum_form = $null
     })
 
     $invalidate = {
@@ -359,11 +380,15 @@ function show_spectrum_panel {
         }
     })
 
-    [void]$form.Show($script:wave_form)
-    try {
-        [DwmDark]::EnableDarkTitleBar($form.Handle)
-    }
-    catch {
+    # 两种模式都记到 spectrum_form（独立窗口模式此前漏赋值，重复打开会叠窗）
+    $script:spectrum_form = $host_root
+    if ($form) {
+        [void]$form.Show($script:wave_form)
+        try {
+            [DwmDark]::EnableDarkTitleBar($form.Handle)
+        }
+        catch {
+        }
     }
 }
 

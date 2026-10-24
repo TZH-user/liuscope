@@ -311,37 +311,26 @@ function draw_wave_slider {
 }
 
 function load_wave_plugins {
-    # 波形窗口每次打开：从注册表重建工具栏按钮（插件文件已在启动时顶层 import）
+    # 合同 v2：注册即页签。第 0 页固定为「波形」，插件页按注册顺序追加；
+    # 页签内容懒加载——首次切入才调 OpenPanel（传入页签容器），异常只移除该页签
     if (-not $script:wave_form -or $script:wave_form.IsDisposed) {
         return
     }
+    if (-not $script:wave_tabs -or $script:wave_tabs.IsDisposed) {
+        return
+    }
 
-    if ($script:wave_plugin_flow -and -not $script:wave_plugin_flow.IsDisposed) {
-        $script:wave_plugin_flow.Controls.Clear()
+    # 重建时只清插件页（≥1），保留索引 0 的「波形」页
+    for ($i = $script:wave_tabs.Controls.Count - 1; $i -ge 1; $i--) {
+        $script:wave_tabs.Controls.RemoveAt($i)
     }
 
     foreach ($plugin in $script:wave_plugins) {
-        $btn = New-Object System.Windows.Forms.Button
-        $btn.Text = $plugin.Name
-        $btn.Tag = $plugin.OpenPanel
-        if ($plugin.Description) {
-            $tool_tip = New-Object System.Windows.Forms.ToolTip
-            $tool_tip.SetToolTip($btn, $plugin.Description)
-        }
-        $btn.AutoSize = $true
-        $btn.Margin = New-Object System.Windows.Forms.Padding(2, 2, 8, 2)
-        style_wave_button -button $btn
-        $btn.Add_Click({
-            param($sender, $event_args)
-            try {
-                & $sender.Tag
-            }
-            catch {
-                write_runtime_log -message ('插件执行异常 {0}:{1}行: {2}' -f (Split-Path -Leaf $_.InvocationInfo.ScriptName), $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message)
-                [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '插件异常', 'OK', 'Error') | Out-Null
-            }
-        })
-        [void]$script:wave_plugin_flow.Controls.Add($btn)
+        $page = New-Object System.Windows.Forms.TabPage
+        $page.Text = $plugin.Name
+        $page.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 33)
+        $page.Tag = @{ Panel = $plugin.OpenPanel; Built = $false }
+        [void]$script:wave_tabs.Controls.Add($page)
     }
 }
 
@@ -2585,18 +2574,6 @@ function open_wave_window {
     $script:wtext_filter_param.Size = New-Object System.Drawing.Size(56, 24)
     $script:wtext_filter_param.Text = '16'
 
-    $wlabel_plugin = New-Object System.Windows.Forms.Label
-    $wlabel_plugin.Text = '插件'
-    $wlabel_plugin.Location = New-Object System.Drawing.Point(610, 48)
-    $wlabel_plugin.AutoSize = $true
-    $wlabel_plugin.ForeColor = [System.Drawing.Color]::FromArgb(168, 178, 195)
-
-    $script:wave_plugin_flow = New-Object System.Windows.Forms.FlowLayoutPanel
-    $script:wave_plugin_flow.Location = New-Object System.Drawing.Point(648, 42)
-    $script:wave_plugin_flow.Size = New-Object System.Drawing.Size(585, 30)
-    $script:wave_plugin_flow.FlowDirection = 'LeftToRight'
-    $script:wave_plugin_flow.WrapContents = $false
-    $script:wave_plugin_flow.BackColor = [System.Drawing.Color]::Transparent
 
     # ---- 场景预设（第二行中部）：波特率+协议+滤波+视图 一键切换 ----
     $wlabel_preset = New-Object System.Windows.Forms.Label
@@ -2650,14 +2627,12 @@ function open_wave_window {
         $wlabel_preset,
         $script:wcombo_preset,
         $script:wbutton_preset_save,
-        $script:wbutton_preset_del,
-        $wlabel_plugin,
-        $script:wave_plugin_flow
+        $script:wbutton_preset_del
     ))
 
-    # 分组分隔线：数据源 | 通道 | 视图 | 时间窗 | 协议（第二行：滤波 | 预设 | 插件）
+    # 分组分隔线：数据源 | 通道 | 视图 | 时间窗 | 协议（第二行：滤波 | 预设）
     $sep_color = [System.Drawing.Color]::FromArgb(58, 66, 84)
-    foreach ($sep_pos in @(@(332, 8, 26), @(417, 8, 26), @(605, 8, 26), @(827, 8, 26), @(959, 8, 26), @(292, 44, 24), @(604, 44, 24))) {
+    foreach ($sep_pos in @(@(332, 8, 26), @(417, 8, 26), @(605, 8, 26), @(827, 8, 26), @(959, 8, 26), @(292, 44, 24))) {
         $sep = New-Object System.Windows.Forms.Label
         $sep.Location = New-Object System.Drawing.Point($sep_pos[0], $sep_pos[1])
         $sep.Size = New-Object System.Drawing.Size(2, $sep_pos[2])
@@ -3190,12 +3165,68 @@ function open_wave_window {
 
     $wave_statusbar.Controls.Add($wave_status_right)
 
-    $script:wave_form.Controls.Add($script:wave_slider_panel)
-    $script:wave_form.Controls.Add($script:wave_panel)
-    $script:wave_form.Controls.Add($script:wave_splitter)
-    $script:wave_form.Controls.Add($script:wave_channel_flow)
-    $script:wave_form.Controls.Add($wave_statusbar)
-    $script:wave_form.Controls.Add($wave_toolbar)
+    # 页签化（插件合同 v2）：波形与所有插件共用这一个窗口——第 0 页是波形本体，
+    # 每个已注册插件一页（load_wave_plugins 追加），首次切入才构建内容。
+    # 原本直接挂在窗体上的六个控件整体移入「波形」页，Dock 语义在 TabPage 内不变。
+    $script:wave_tabs = New-Object System.Windows.Forms.TabControl
+    $script:wave_tabs.Dock = 'Fill'
+    $script:wave_tabs.Font = new_font -name 'Microsoft YaHei UI' -size 9
+    # 深色页签：自绘（窗口固定深色，原生页签条是亮的）
+    $script:wave_tabs.DrawMode = 'OwnerDrawFixed'
+    $script:wave_tabs.ItemSize = New-Object System.Drawing.Size(0, 26)
+    $script:wave_tabs.Add_DrawItem({
+        param($sender, $event_args)
+        $tab_bg = [System.Drawing.Color]::FromArgb(28, 33, 45)
+        $tab_fg = [System.Drawing.Color]::FromArgb(168, 178, 195)
+        if (($event_args.State -band [System.Windows.Forms.DrawItemState]::Selected) -ne 0) {
+            $tab_bg = [System.Drawing.Color]::FromArgb(20, 24, 33)
+            $tab_fg = [System.Drawing.Color]::FromArgb(225, 230, 240)
+        }
+        $brush = New-Object System.Drawing.SolidBrush($tab_bg)
+        $event_args.Graphics.FillRectangle($brush, $event_args.Bounds)
+        $brush.Dispose()
+        $text_brush = New-Object System.Drawing.SolidBrush($tab_fg)
+        $sf = New-Object System.Drawing.StringFormat
+        $sf.Alignment = 'Center'
+        $sf.LineAlignment = 'Center'
+        $event_args.Graphics.DrawString($sender.TabPages[$event_args.Index].Text, $sender.Font, $text_brush, [System.Drawing.RectangleF]::op_Implicit($event_args.Bounds), $sf)
+        $text_brush.Dispose()
+        $sf.Dispose()
+    })
+
+    $wave_home = New-Object System.Windows.Forms.TabPage
+    $wave_home.Text = '波形'
+    $wave_home.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 33)
+    $wave_home.Controls.Add($script:wave_slider_panel)
+    $wave_home.Controls.Add($script:wave_panel)
+    $wave_home.Controls.Add($script:wave_splitter)
+    $wave_home.Controls.Add($script:wave_channel_flow)
+    $wave_home.Controls.Add($wave_statusbar)
+    $wave_home.Controls.Add($wave_toolbar)
+    $script:wave_tabs.Controls.Add($wave_home)
+    $script:wave_form.Controls.Add($script:wave_tabs)
+
+    # 懒加载 + 崩溃隔离：插件页签首次切入才构建；构建异常只移除该页签并退回波形页
+    $script:wave_tabs.Add_SelectedIndexChanged({
+        param($sender, $event_args)
+        $page = $sender.SelectedTab
+        if (-not $page -or -not $page.Tag -or $page.Tag.Built) {
+            return
+        }
+        $page.Tag.Built = $true
+        try {
+            & $page.Tag.Panel $page
+        }
+        catch {
+            write_runtime_log -message ('插件执行异常 {0}:{1}行: {2}' -f (Split-Path -Leaf $_.InvocationInfo.ScriptName), $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message)
+            [void]$sender.Controls.Remove($page)
+            $page.Dispose()
+            if ($sender.Controls.Count -gt 0) {
+                $sender.SelectedIndex = 0
+            }
+            [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '插件异常', 'OK', 'Error') | Out-Null
+        }
+    })
 
     ensure_wave_channel_checks
 
@@ -3514,6 +3545,7 @@ function open_wave_window {
         dispose_wave_xy_bitmaps
         $script:wave_xy_section = $null
         $script:wave_form = $null
+        $script:wave_tabs = $null
         $script:wave_panel = $null
         $script:wave_channel_flow = $null
         $script:wave_enabled = $false

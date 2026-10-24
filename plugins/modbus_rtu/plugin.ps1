@@ -17,7 +17,7 @@
 #   4. 内部错误自行 try/catch，不向外抛（异常隔离由宿主兜底）
 # ============================================================
 
-$plugin_api_version = 1
+$plugin_api_version = 2   # v2 = OpenPanel 接收页签容器
 
 $script:modbus_form = $null
 $script:modbus_poll_timer = $null
@@ -754,27 +754,48 @@ function run_modbus_watch_cycle {
 }
 
 function show_modbus_panel {
-    if ($script:modbus_form -and -not $script:modbus_form.IsDisposed) {
+    # 合同 v2：传入 $container（波形窗口的插件页签）时内容长在页签里，不再开独立窗口；
+    # 不传则退回独立窗口模式（向后兼容单独调用）。$script:modbus_form 两种模式下
+    # 都指向内容根控件（窗体或面板），内部 IsDisposed 守卫因此无需区分。
+    param([System.Windows.Forms.Control]$container = $null)
+
+    if ($container) {
+        if ($script:modbus_form -and -not $script:modbus_form.IsDisposed) {
+            return
+        }
+    }
+    elseif ($script:modbus_form -and -not $script:modbus_form.IsDisposed) {
         $script:modbus_form.Show()
         $script:modbus_form.Activate()
         return
     }
 
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = 'Modbus RTU 主站 — 插件'
-    $form.StartPosition = 'CenterParent'
-    $form.Size = New-Object System.Drawing.Size(790, 560)
-    $form.MinimumSize = New-Object System.Drawing.Size(640, 460)
-    # 深色标题栏要在句柄建立时就挂上，Show 之后再调不生效（DWM 首帧前决定明暗）
-    $form.Add_HandleCreated({
-        try {
-            [DwmDark]::EnableDarkTitleBar($this.Handle, $true)
-        }
-        catch {
-        }
-    })
-    $form.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 33)
-    $form.Font = new_font -name 'Microsoft YaHei UI' -size 9
+    $form = $null
+    if ($container) {
+        $host_root = New-Object System.Windows.Forms.Panel
+        $host_root.Dock = 'Fill'
+        $host_root.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 33)
+        $host_root.Font = new_font -name 'Microsoft YaHei UI' -size 9
+        [void]$container.Controls.Add($host_root)
+    }
+    else {
+        $form = New-Object System.Windows.Forms.Form
+        $host_root = $form
+        $host_root.Text = 'Modbus RTU 主站 — 插件'
+        $host_root.StartPosition = 'CenterParent'
+        $host_root.Size = New-Object System.Drawing.Size(790, 560)
+        $host_root.MinimumSize = New-Object System.Drawing.Size(640, 460)
+        # 深色标题栏要在句柄建立时就挂上，Show 之后再调不生效（DWM 首帧前决定明暗）
+        $host_root.Add_HandleCreated({
+            try {
+                [DwmDark]::EnableDarkTitleBar($this.Handle, $true)
+            }
+            catch {
+            }
+        })
+        $host_root.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 33)
+        $host_root.Font = new_font -name 'Microsoft YaHei UI' -size 9
+    }
 
     $toolbar = New-Object System.Windows.Forms.Panel
     $toolbar.Dock = 'Top'
@@ -1050,8 +1071,8 @@ function show_modbus_panel {
     $tab_watch.Controls.Add($script:modbus_watch_grid)
     $tab_watch.Controls.Add($watch_strip)
 
-    $form.Controls.Add($script:modbus_tab_ctrl)
-    $form.Controls.Add($toolbar)
+    $host_root.Controls.Add($script:modbus_tab_ctrl)
+    $host_root.Controls.Add($toolbar)
 
     $button_run.Add_Click({ run_modbus_ui_transaction })
     $script:modbus_check_poll.Add_CheckedChanged({
@@ -1137,7 +1158,9 @@ function show_modbus_panel {
     $script:modbus_watch_timer.Interval = 500
     $script:modbus_watch_timer.Add_Tick({ run_modbus_watch_cycle })
 
-    $form.Add_FormClosed({
+    # 随内容根控件销毁清理：页签模式在波形窗口关闭（页签 Dispose）时触发，
+    # 独立窗口模式在窗体关闭时触发，同一套清理
+    $host_root.Add_Disposed({
         foreach ($t in @($script:modbus_poll_timer, $script:modbus_watch_timer)) {
             if ($t) {
                 try {
@@ -1155,11 +1178,13 @@ function show_modbus_panel {
         $script:modbus_form = $null
     })
 
-    $script:modbus_form = $form
+    $script:modbus_form = $host_root
     update_modbus_status
     append_modbus_result -text 'Modbus RTU 调试台就绪。设备侧为从站；主窗口需已连接串口。'
     append_modbus_result -text '「实时监视」页可把读地址加入 Watch 表，按关键(从站:FC:地址)合并轮询、涨绿跌红；双击行回填到事务区。'
-    $form.Show()
+    if ($form) {
+        $form.Show()
+    }
 }
 
 Register-WavePlugin -Name 'Modbus' -Description 'Modbus RTU 主站：读/写线圈与寄存器，CRC16 校验、轮询、多格式解码，事务回写主日志' -OpenPanel ${function:show_modbus_panel}
