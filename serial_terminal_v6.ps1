@@ -2134,7 +2134,12 @@ $button_find_close.Add_Click({ toggle_find_panel -show:$false })
 # 输入即搜：150ms 防抖后从头重新匹配 + 高亮（Enter/按钮才是继续从当前位置跳）
 $script:find_live_timer = New-Object System.Windows.Forms.Timer
 $script:find_live_timer.Interval = 150
-$script:find_live_timer.Add_Tick({ invoke_log_find -restart:$true })
+$script:find_live_timer.Add_Tick({
+    # WinForms Timer 是周期性的：tick 必须先自停，否则查找栏开着就每 150ms
+    # 从文档头重搜一次，「下一个 / 上一个」刚跳过去就被拽回首处
+    $script:find_live_timer.Stop()
+    invoke_log_find -restart:$true
+})
 $script:find_box.Add_TextChanged({
     $script:find_live_timer.Stop()
     $script:find_live_timer.Start()
@@ -2875,13 +2880,36 @@ if ($WaveTest) {
     toggle_find_panel
     if (-not $script:find_panel.Visible) { throw 'find panel toggle failed' }
 
-    # 真实链路：注入标记行 → 文本查找命中（含高亮铺色）→ 截图留档（logs\find_preview.png）
+    # 真实链路：注入两行标记 → 输入即搜（live 计时器路径）→ 导航后不被拽回首处
     append_received_bytes -bytes ([System.Text.Encoding]::UTF8.GetBytes('findme_marker_alpha' + "`n"))
+    append_received_bytes -bytes ([System.Text.Encoding]::UTF8.GetBytes('findme_marker_beta' + "`n"))
     flush_pending_display_entries -DrainAll
     $script:find_box.Text = 'findme_marker'
-    invoke_log_find
+    # 泵消息 360ms：让 150ms 防抖 tick 真实走完（live 搜索路径）
+    for ($k = 0; $k -lt 6; $k++) {
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 60
+    }
+    if ($script:find_label_count.Text -ne '第 1/2 处') { throw ('live search count wrong: ' + $script:find_label_count.Text) }
     if ($textbox_rx.SelectionLength -le 0) { throw 'find did not select any match' }
     if ($script:find_highlight_ranges.Count -le 0) { throw 'find highlight missing' }
+    $live_sel = $textbox_rx.SelectionStart
+
+    invoke_log_find
+    if ($script:find_label_count.Text -ne '第 2/2 处') { throw ('find next count wrong: ' + $script:find_label_count.Text) }
+    $next_sel = $textbox_rx.SelectionStart
+    if ($next_sel -le $live_sel) { throw 'find next did not advance' }
+
+    # 关键回归：导航后再泵 360ms（>2 个防抖周期），不得被 live 计时器拽回首处
+    for ($k = 0; $k -lt 6; $k++) {
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 60
+    }
+    if ($script:find_label_count.Text -ne '第 2/2 处') { throw 'live timer yanked count back after navigation' }
+    if ($textbox_rx.SelectionStart -ne $next_sel) { throw 'live timer yanked selection back after navigation' }
+
+    invoke_log_find -backward:$true
+    if ($script:find_label_count.Text -ne '第 1/2 处') { throw 'find backward did not return to first' }
     Write-Output 'WAVETEST find bar OK'
 
     # JustFloat / RawData 协议字节流往返

@@ -1615,6 +1615,12 @@ function invoke_log_find {
         return
     }
 
+    if (-not $restart -and $script:find_live_timer) {
+        # 显式导航（Enter / 上一个下一个 / F3）时取消还没触发的即时搜索：
+        # 不然 150ms 内的防抖 tick 会把刚跳过去的新位置拽回文档头
+        $script:find_live_timer.Stop()
+    }
+
     $query = [string]$script:find_box.Text
     if ([string]::IsNullOrWhiteSpace($query)) {
         clear_find_highlights
