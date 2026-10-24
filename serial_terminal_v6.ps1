@@ -1607,7 +1607,10 @@ if ($SelfTest) {
     [void](center_log_view_to_char -char_index 0)
 
     # Modbus RTU 插件：CRC 标准向量、建帧、响应解析、异常帧、线圈展开、float32 解码、假串口整链路
-    . (Join-Path $PSScriptRoot 'plugins\modbus_rtu\plugin.ps1')
+    # 顶层的 Register-WavePlugin 会返回注册对象：dot-source 时若不捕获，对象会
+    # 直接抛进成功输出流；stdout 被重定向时（CI/测试环境）格式化该对象会杀死
+    # WinPS 控制台输出写入器，之后所有 Write-Output 静默消失（含 SELFTEST_FAIL）
+    $null = . (Join-Path $PSScriptRoot 'plugins\modbus_rtu\plugin.ps1')
     $mb_built = build_modbus_request -slave 1 -fc 3 -start 0 -count 2 -value_text '' -value_list @()
     assert_wave_test 'modbus_crc_vector' ($mb_built.Error -eq '' -and (bytes_to_hex_text -bytes $mb_built.Bytes) -eq '01 03 00 00 00 02 C4 0B')
     assert_wave_test 'modbus_crc_check' (test_modbus_crc -frame $mb_built.Bytes)
@@ -2282,7 +2285,9 @@ if (Test-Path -LiteralPath $plugins_root) {
             continue
         }
         try {
-            . $plugin_file
+            # 同 SelfTest：插件顶层 Register 返回对象，捕获掉，防止重定向 stdout
+            # 时格式化输出对象杀死 WinPS 输出写入器（后续全部 Write-Output 失声）
+            $null = . $plugin_file
         }
         catch {
             write_runtime_log -message ('插件加载失败 {0} {1}:{2}行: {3}' -f $plugin_dir.Name, (Split-Path -Leaf $_.InvocationInfo.ScriptName), $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message)
