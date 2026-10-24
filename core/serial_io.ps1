@@ -634,6 +634,26 @@ function flush_rx_line_buffer {
     reset_rx_line_buffer
 }
 
+function flush_rx_line_if_idle {
+    # 空闲落显：ASCII 模式下无换行的残行原本要攒到 8KB 才强制显示——短消息
+    # （不带换行的 AT+OK 之类）会一直看不见。静默超过阈值就把残行就地落成一条 RX。
+    # 状态定时器（500ms）每轮调用；正常收发时残行在 ~0.5s 内显示、积压归零，
+    # 「积压」指标回归纯异常信号（数据持续流入但格式/波特率不对）。
+    param([int]$idle_ms = 400)
+
+    if (-not $script:rx_last_byte_at) {
+        return $false
+    }
+    if ([string]::IsNullOrEmpty($script:rx_line_buffer)) {
+        return $false
+    }
+    if (([datetime]::Now - $script:rx_last_byte_at).TotalMilliseconds -lt $idle_ms) {
+        return $false
+    }
+    flush_rx_line_buffer
+    return $true
+}
+
 function append_received_ascii_text {
     param(
         [string]$text
@@ -699,6 +719,7 @@ function reset_receive_stats {
     $script:rx_bytes_total = [long]0
     $script:rx_line_total = [long]0
     $script:ui_skip_total = [long]0
+    $script:rx_last_byte_at = [datetime]::Now
 }
 
 function stop_receive_timer {
@@ -732,6 +753,7 @@ function update_connected_status {
     if (-not $script:connected) {
         $script:rx_backlog_last = [long]0
         $script:rx_backlog_growth_ticks = 0
+        $script:rx_backlog_bytes = [long]0
         return
     }
 
@@ -749,9 +771,11 @@ function update_connected_status {
         $status_text += ' | 波形帧 {0}' -f $script:wave_frame_total
     }
 
-    # 缓冲积压监控：未成行文本 + 波形协议里等帧尾/等换行的未解析字节。
-    # 持续增长 = 数据不是当前协议格式或波特率不对（解码全是乱码凑不出行）。
+    # 缓冲积压监控（常显变量 $script:rx_backlog_bytes）：未成行文本 + 波形协议里
+    # 等帧尾/等换行的未解析字节 = 「已接收但还没显示」的量。空闲落显保证正常收发时
+    # 归零；持续增长 = 数据不是当前协议格式或波特率不对（解码全是乱码凑不出行）。
     $backlog = [long]$script:rx_line_buffer.Length + [long]$script:wave_jf_buffer.Count + [long]$script:wave_line_buffer.Length
+    $script:rx_backlog_bytes = $backlog
     $tone = 'ok'
     if ($backlog -gt 0) {
         $delta = $backlog - $script:rx_backlog_last
@@ -774,6 +798,7 @@ function update_connected_status {
     }
     else {
         $script:rx_backlog_growth_ticks = 0
+        $status_text += ' | 积压 0 B'
     }
     $script:rx_backlog_last = $backlog
 
@@ -786,6 +811,9 @@ function start_status_timer {
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = 500
     $timer.Add_Tick({
+        # 无换行残行的空闲落显（见 flush_rx_line_if_idle）：先落显再刷新状态条，
+        # 数据停流后积压指标才能归零
+        [void](flush_rx_line_if_idle)
         update_connected_status
     })
 
@@ -927,6 +955,7 @@ function append_received_bytes {
     }
 
     $script:rx_bytes_total += $bytes.Length
+    $script:rx_last_byte_at = [datetime]::Now
     try_consume_wave_bytes -bytes $bytes
 
     if ($script:session_record_writer) {

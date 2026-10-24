@@ -831,6 +831,9 @@ $script:send_history_draft = ''
 $script:file_send_state = $null
 $script:rx_backlog_last = [long]0
 $script:rx_backlog_growth_ticks = 0
+# 「已接收未显示」积压量（未成行文本 + 波形协议残尾）与最近收到字节的时刻（空闲落显用）
+$script:rx_backlog_bytes = [long]0
+$script:rx_last_byte_at = $null
 $script:wave_overflow_note_last = [datetime]::MinValue
 $script:log_hover_tip = $null
 $script:log_hover_state = $null
@@ -1532,10 +1535,10 @@ if ($SelfTest) {
     $script:rx_backlog_last = [long]0
     $script:rx_backlog_growth_ticks = 0
     update_connected_status
-    assert_wave_test 'status_clean' ($label_status.Text -match 'COM99' -and $label_status.Text -notmatch '积压')
+    assert_wave_test 'status_clean' ($label_status.Text -match 'COM99' -and $label_status.Text -match '积压 0 B' -and $script:rx_backlog_bytes -eq 0)
     [void]$script:wave_jf_buffer.AddRange([byte[]](1..100))
     update_connected_status
-    assert_wave_test 'status_backlog_shown' ($label_status.Text -match '积压 100 B')
+    assert_wave_test 'status_backlog_shown' ($label_status.Text -match '积压 100 B' -and $script:rx_backlog_bytes -eq 100)
     for ($k = 0; $k -lt 5; $k++) {
         [void]$script:wave_jf_buffer.AddRange((New-Object byte[] 1000))
         update_connected_status
@@ -1543,9 +1546,19 @@ if ($SelfTest) {
     assert_wave_test 'status_backlog_warn' ($label_status.ForeColor -eq (get_status_color -tone 'warn'))
     $script:wave_jf_buffer.Clear()
     update_connected_status
-    assert_wave_test 'status_backlog_gone' ($label_status.Text -notmatch '积压')
+    assert_wave_test 'status_backlog_gone' ($label_status.Text -match '积压 0 B' -and $script:rx_backlog_bytes -eq 0)
     $script:connected = $false
     $script:wave_enabled = $false
+
+    # 空闲落显（无换行残行静默超阈值即显示，不再等 8KB 强制线；新鲜字节不触发）
+    $script:rx_line_buffer = 'no_newline_tail'
+    $script:rx_last_byte_at = (Get-Date).AddSeconds(-2)
+    assert_wave_test 'idle_flush_fires' (flush_rx_line_if_idle)
+    assert_wave_test 'idle_flush_cleared' ([string]::IsNullOrEmpty($script:rx_line_buffer))
+    $script:rx_line_buffer = 'fresh_tail'
+    $script:rx_last_byte_at = [datetime]::Now
+    assert_wave_test 'idle_flush_holds_fresh' (-not (flush_rx_line_if_idle))
+    $script:rx_line_buffer = ''
 
     # 文件发送状态机（假串口）：3 块写满 10000 字节自动收尾；中途停止不再续发
     if (-not ('V6FakeSerialPort' -as [type])) {
@@ -2938,6 +2951,20 @@ if ($WaveTest) {
     invoke_log_find -backward:$true
     if ($script:find_label_count.Text -ne '第 1/2 处') { throw 'find backward did not return to first' }
     Write-Output 'WAVETEST find bar OK'
+
+    # 空闲落显端到端：无换行残行静默超阈值 → 自动落成 RX 条目并清空缓冲；新鲜字节不触发
+    $before_entries = $script:message_entries.Count
+    $script:rx_line_buffer = 'idle_flush_tail_no_newline'
+    $script:rx_last_byte_at = (Get-Date).AddSeconds(-2)
+    if (-not (flush_rx_line_if_idle)) { throw 'idle flush did not fire' }
+    if ($script:rx_line_buffer -ne '') { throw 'idle flush left residue' }
+    if ($script:message_entries.Count -ne ($before_entries + 1)) { throw 'idle flush entry missing' }
+    if ($script:message_entries[$script:message_entries.Count - 1].Text -ne 'idle_flush_tail_no_newline') { throw 'idle flush entry text wrong' }
+    $script:rx_line_buffer = 'fresh_tail'
+    $script:rx_last_byte_at = [datetime]::Now
+    if (flush_rx_line_if_idle) { throw 'idle flush fired on fresh bytes' }
+    $script:rx_line_buffer = ''
+    Write-Output 'WAVETEST idle flush OK'
 
     # JustFloat / RawData 协议字节流往返
     $script:wave_protocol = 'JustFloat'
