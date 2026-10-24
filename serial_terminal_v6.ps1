@@ -1722,7 +1722,7 @@ if ($Headless) {
 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'RK3562 串口收发工具 V6'
+$form.Text = ('RK3562 串口收发工具 V6 ({0})' -f $script:app_version)
 $form.StartPosition = 'CenterScreen'
 $form.Size = New-Object System.Drawing.Size(1360, 820)
 $form.MinimumSize = New-Object System.Drawing.Size(1270, 760)
@@ -2590,7 +2590,7 @@ $tooltip_main.SetToolTip($script:find_box, '输入关键字：输入即匹配并
 function show_help_dialog {
     # 功能速览：给新用户的单页功能索引（配色跟随当前主题；只读，Esc / 关闭按钮退出）
     $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = '功能速览 — RK3562 串口收发工具 V6'
+    $dlg.Text = ('功能速览 — RK3562 串口收发工具 V6 ({0})' -f $script:app_version)
     $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
     $dlg.MaximizeBox = $false
     $dlg.MinimizeBox = $false
