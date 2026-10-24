@@ -765,6 +765,14 @@ function show_modbus_panel {
     $form.StartPosition = 'CenterParent'
     $form.Size = New-Object System.Drawing.Size(790, 560)
     $form.MinimumSize = New-Object System.Drawing.Size(640, 460)
+    # 深色标题栏要在句柄建立时就挂上，Show 之后再调不生效（DWM 首帧前决定明暗）
+    $form.Add_HandleCreated({
+        try {
+            [DwmDark]::EnableDarkTitleBar($this.Handle, $true)
+        }
+        catch {
+        }
+    })
     $form.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 33)
     $form.Font = new_font -name 'Microsoft YaHei UI' -size 9
 

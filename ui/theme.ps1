@@ -306,7 +306,7 @@ function apply_theme {
     $textbox_send.EnableDarkScroll($is_dark, $ui.InputBg)
 
     # 按钮：全部统一扁平款，只有「连接」是 accent
-    foreach ($button in @($button_refresh, $button_wave, $button_clear, $button_save,
+    foreach ($button in @($button_refresh, $button_wave, $button_clear, $button_save, $button_help,
             $button_actions_toggle, $button_reset, $button_flash, $button_hit_clear, $button_send,
             $button_find_prev, $button_find_next, $button_find_close)) {
         style_main_button -button $button

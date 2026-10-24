@@ -26,7 +26,8 @@
     [string]$ShotTheme = '',
     # screen = 真实抓屏（能拍到 ComboBox/滚动条/复选框这些系统主题绘制的控件）
     # bitmap = 窗体内 DrawToBitmap（拍不到上面那几类，但不受遮挡影响）
-    [ValidateSet('screen', 'bitmap')]
+    # demo   = screen + 注入演示日志/查找高亮，续拍波形窗与 Modbus 监视页（README 用图）
+    [ValidateSet('screen', 'bitmap', 'demo')]
     [string]$ShotMode = 'bitmap'
 )
 
@@ -771,6 +772,23 @@ public static class V6Native
 {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    // 演示截图用：PrintWindow 直接渲染窗口自身像素（PW_RENDERFULLCONTENT=2），
+    // 不要求窗口在前台，也不会把屏幕上无关内容拍进去
+    [DllImport("user32.dll")]
+    public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
 }
 '@ -ErrorAction Stop
 }
@@ -1853,6 +1871,11 @@ $button_save.Text = '导出日志'
 $button_save.Location = New-Object System.Drawing.Point(990, 46)
 $button_save.Size = New-Object System.Drawing.Size(90, 32)
 
+$button_help = New-Object System.Windows.Forms.Button
+$button_help.Text = '帮助'
+$button_help.Location = New-Object System.Drawing.Point(1225, 46)
+$button_help.Size = New-Object System.Drawing.Size(100, 32)
+
 # ---- 状态行被移出顶部面板，改为底部状态条（见 $panel_status） ----
 $label_status_title = New-Object System.Windows.Forms.Label
 $label_status_title.Text = '状态'
@@ -1964,6 +1987,7 @@ $panel_top.Controls.AddRange(@(
     $button_disconnect,
     $button_clear,
     $button_save,
+    $button_help,
     $button_actions_toggle,
     $label_actions,
     $combobox_reset_mode,
@@ -2212,7 +2236,7 @@ $checkbox_clear_after_send.AutoSize = $true
 $checkbox_clear_after_send.Checked = $true
 
 $label_hint = New-Object System.Windows.Forms.Label
-$label_hint.Text = '左侧记录串口返回，右侧记录用户发送；波形窗口每行 ch0,ch1,... 自动成曲线。'
+$label_hint.Text = '左侧记录串口返回，右侧记录用户发送；点「帮助」看全部功能：Ctrl+F 查找与时间戳定位 / 悬停日志行自动 HEX⇄文本互转 / ⬆⬇ 回翻发送历史 / 波形窗口含 Modbus 插件。'
 $label_hint.Location = New-Object System.Drawing.Point(10, 116)
 # 这条提示也是长文本且 AutoSize，窗体一窄就会溢出面板被裁掉一半。
 # 定宽 + 省略号 + 左右锚定，随窗体一起伸缩。
@@ -2504,6 +2528,184 @@ $button_send_file.Add_Click({
 $tooltip_main = New-Object System.Windows.Forms.ToolTip
 $tooltip_main.SetToolTip($button_send_file, '选择文件按原样字节流分块发送（大文件不卡界面）；发送中再点一次停止。换行/HEX 设置对文件发送不生效')
 
+# 主窗体控件提示：悬停即知功能；全文索引在「帮助」按钮的《功能速览》里
+$tooltip_main.SetToolTip($button_wave, '打开波形窗口：FireWater / JustFloat / RawData 实时曲线、频谱、XY 相位图（IQ 星座）；插件区可开 Modbus RTU 调试台')
+$tooltip_main.SetToolTip($button_help, '功能速览：全部功能点与快捷键一览')
+$tooltip_main.SetToolTip($button_connect, '按当前参数打开串口并开始接收')
+$tooltip_main.SetToolTip($button_refresh, '重新扫描系统串口；勾选「新设备自动连接」后插入设备即自动连上')
+$tooltip_main.SetToolTip($textbox_rx, 'RX 日志：悬停任意行 0.4 秒自动 HEX⇄文本/十进制/float32 互转；Ctrl+F 查找与时间戳定位')
+$tooltip_main.SetToolTip($textbox_tx, 'TX 日志：悬停行查看该发送内容的 UTF-8 HEX')
+$tooltip_main.SetToolTip($textbox_send, '输入要发送的内容；⬆/⬇ 像 cmd 一样回翻发送历史，⬇ 走到底恢复正在编辑的草稿')
+$tooltip_main.SetToolTip($button_send, '发送输入框内容（发送格式为 HEX 时按十六进制解析）')
+$tooltip_main.SetToolTip($checkbox_append_newline, '发送时在末尾追加所选换行符（CR / LF / CRLF）')
+$tooltip_main.SetToolTip($button_clear, '清空 RX / TX 日志显示')
+$tooltip_main.SetToolTip($button_save, '把当前 RX 日志导出为文件')
+$tooltip_main.SetToolTip($script:find_box, '输入关键字：输入即匹配并高亮全部命中、行自动居中；输入 20:57 这类时间戳则直接跳到该时刻的日志。Enter 下一个 / Shift+Enter 上一个 / Esc 关闭')
+
+function show_help_dialog {
+    # 功能速览：给新用户的单页功能索引（配色跟随当前主题；只读，Esc / 关闭按钮退出）
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = '功能速览 — RK3562 串口收发工具 V6'
+    $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $dlg.MaximizeBox = $false
+    $dlg.MinimizeBox = $false
+    $dlg.ShowInTaskbar = $false
+    $dlg.StartPosition = 'CenterParent'
+    $dlg.Size = New-Object System.Drawing.Size(720, 640)
+    $dlg.BackColor = $script:ui.PanelBg
+    $dlg.Font = new_font -name 'Microsoft YaHei UI' -size 9
+
+    $help_lines = @(
+        '【收发与日志】',
+        '  • ASCII / HEX 双格式收发，换行符可选 CR / LF / CRLF',
+        '  • RX / TX 双栏日志自动按 7:3 分配，可自动保存到 logs 目录、一键导出',
+        '  • 悬停任意日志行 0.4 秒：HEX 行自动解码为 文本(UTF-8) / 十进制 / float32，文本行给出 HEX',
+        '',
+        '【查找与定位】（Ctrl+F）',
+        '  • 输入即搜：打字过程实时匹配，全部命中弱色高亮 + 当前命中强色高亮，行自动滚到视口中间',
+        '  • Enter / Shift+Enter（或 F3 / Shift+F3）向后 / 向前循环跳转，到头自动回绕，不分大小写',
+        '  • 直接输入时间戳（如 20:57:38 或 2026-10-24 20:57:38）跳到第一条 ≥ 该时刻的日志',
+        '',
+        '【发送增强】',
+        '  • ⬆ / ⬇ 像 cmd 一样回翻发送历史（上限 200 条，⬇ 走到底恢复正在编辑的草稿）',
+        '  • 文件发送：任意文件按 4KiB 分块流式发送，大文件不卡界面，发送中可随时停止',
+        '',
+        '【波形示波】（点「波形窗口」）',
+        '  • FireWater / JustFloat / RawData 三协议实时曲线 + 频谱插件 + XY 相位图（IQ 星座图）',
+        '  • 无设备时点「模拟数据源」验证整条链路；曲线可导出 PNG / CSV / TXT',
+        '  • 协议格式或波特率不匹配时，状态条显示缓冲「积压」增长并变色提醒（黄→红）',
+        '',
+        '【Modbus RTU 插件】（波形窗口 → 插件区 → Modbus）',
+        '  • 事务页：功能码 01/02/03/04/05/06/0F/10，CRC16 自动生成与校验，异常码中文说明，',
+        '    寄存器解码支持 HEX / 十进制 / 有符号 / float32(ABCD / CDAB)',
+        '  • 实时监视页：把读地址加入 Watch 表，合并轮询，数值变化闪色（涨绿 / 跌红），双击行回填事务区',
+        '',
+        '【快捷键】',
+        '  Ctrl+F 查找栏    Enter 下一个    Shift+Enter 上一个    F3 / Shift+F3 循环跳转',
+        '  Esc 关闭查找栏    ⬆ / ⬇ 发送历史',
+        '',
+        '详细文档见仓库 README · github.com/TZH-user/serialscope'
+    )
+
+    $body = New-Object DarkRichTextBox
+    $body.Location = New-Object System.Drawing.Point(14, 12)
+    $body.Size = New-Object System.Drawing.Size(676, 524)
+    $body.Anchor = 'Top,Bottom,Left,Right'
+    $body.BorderStyle = 'None'
+    $body.ReadOnly = $true
+    $body.BackColor = $script:ui.PanelBg
+    $body.ForeColor = $script:ui.TextMain
+    $body.Text = ($help_lines -join "`n")
+    $body.EnableDarkScroll($true, $script:ui.PanelBg)
+    # 段落头用信息蓝、尾行用弱色，正文用主前景色（\n 拼接，按行偏移上色）
+    $offset = 0
+    foreach ($line in $help_lines) {
+        $body.SelectionStart = $offset
+        $body.SelectionLength = $line.Length
+        if ($line.StartsWith('【')) {
+            $body.SelectionColor = $script:ui.InfoText
+        }
+        elseif ($line.StartsWith('详细文档')) {
+            $body.SelectionColor = $script:ui.TextDim
+        }
+        else {
+            $body.SelectionColor = $script:ui.TextMain
+        }
+        $offset += $line.Length + 1
+    }
+    $body.SelectionStart = 0
+    $body.SelectionLength = 0
+    $dlg.Controls.Add($body)
+
+    $link_repo = New-Object System.Windows.Forms.LinkLabel
+    $link_repo.Text = 'github.com/TZH-user/serialscope'
+    $link_repo.Location = New-Object System.Drawing.Point(14, 556)
+    $link_repo.Anchor = 'Bottom,Left'
+    $link_repo.AutoSize = $true
+    $link_repo.LinkColor = $script:ui.InfoText
+    $link_repo.Add_LinkClicked({
+        try {
+            [System.Diagnostics.Process]::Start('https://github.com/TZH-user/serialscope')
+        }
+        catch {
+        }
+    })
+    $dlg.Controls.Add($link_repo)
+
+    $btn_close = New-Object System.Windows.Forms.Button
+    $btn_close.Text = '关闭'
+    $btn_close.Location = New-Object System.Drawing.Point(598, 552)
+    $btn_close.Size = New-Object System.Drawing.Size(92, 30)
+    $btn_close.Anchor = 'Bottom,Right'
+    $dlg.Controls.Add($btn_close)
+    style_main_button -button $btn_close
+    $dlg.CancelButton = $btn_close
+    $btn_close.Add_Click({ $dlg.Close() })
+
+    $dlg.Add_Shown({
+        try {
+            [DwmDark]::EnableDarkTitleBar($dlg.Handle, $true)
+        }
+        catch {
+        }
+    })
+    [void]$dlg.ShowDialog($form)
+    $dlg.Dispose()
+}
+
+$button_help.Add_Click({ show_help_dialog })
+
+function capture_window_png {
+    # 演示截图：PrintWindow(PW_RENDERFULLCONTENT) 渲染窗口自身像素。
+    # 不用 CopyFromScreen——它要求窗口在前台，否则会把屏幕上无关窗口拍进去。
+    param([System.Windows.Forms.Form]$win, [string]$path)
+
+    [System.Windows.Forms.Application]::DoEvents()
+    Start-Sleep -Milliseconds 300
+    $rect = New-Object V6Native+RECT
+    [void][V6Native]::GetWindowRect($win.Handle, [ref]$rect)
+    $w = $rect.Right - $rect.Left
+    $h = $rect.Bottom - $rect.Top
+    if ($w -le 0 -or $h -le 0) {
+        throw ('window has no size: {0}' -f $win.Text)
+    }
+    $bmp = New-Object System.Drawing.Bitmap($w, $h)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $hdc = $g.GetHdc()
+    [void][V6Native]::PrintWindow($win.Handle, $hdc, 2)
+    $g.ReleaseHdc($hdc)
+    $g.Dispose()
+    $dir = Split-Path -Parent $path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+        [void](New-Item -ItemType Directory -Path $dir -Force)
+    }
+    $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+    $bmp.Dispose()
+    Write-Output ('DEMO_SHOT {0} {1}x{2}' -f $path, $w, $h)
+}
+
+function inject_demo_log_data {
+    # 演示截图：注入一段仿真的 RK3562 收发日志（时间戳回溯，观感自然），
+    # 再打开查找栏并命中「version」，让高亮与计数标签一起入镜
+    $t0 = (Get-Date).AddMinutes(-3)
+    add_message_entry -direction 'RX' -timestamp $t0.AddSeconds(10) -text 'RK3562 bootloader v1.2 ready'
+    add_message_entry -direction 'RX' -timestamp $t0.AddSeconds(12) -text '55 AA 10 00 20 24 1C'
+    add_message_entry -direction 'TX' -timestamp $t0.AddSeconds(30) -text 'AT+VERSION?'
+    add_message_entry -direction 'RX' -timestamp $t0.AddSeconds(31) -text '+VERSION: fw_version=2.6.1 build 20261020'
+    add_message_entry -direction 'TX' -timestamp $t0.AddSeconds(60) -text 'AT+CPU?'
+    add_message_entry -direction 'RX' -timestamp $t0.AddSeconds(61) -text '+CPU: load=23% temp=41.5C vbat=3.91V'
+    add_message_entry -direction 'RX' -timestamp $t0.AddSeconds(90) -text '48 65 6C 6C 6F 20 52 4B 33 35 36 32'
+    add_message_entry -direction 'TX' -timestamp $t0.AddSeconds(120) -text 'AT+GPIO=1,1'
+    add_message_entry -direction 'RX' -timestamp $t0.AddSeconds(121) -text 'OK'
+    add_message_entry -direction 'SYS' -timestamp $t0.AddSeconds(140) -text 'Modbus RTU 插件已加载：事务调试 + 实时监视 Watch'
+    flush_pending_display_entries -DrainAll
+    [System.Windows.Forms.Application]::DoEvents()
+    toggle_find_panel
+    $script:find_box.Text = 'version'
+    invoke_log_find
+    $script:find_box.Focus()
+}
+
 $form.Add_Shown({
     start_ui_flush_timer
     # 日志区比例：写死 SplitterDistance 在窗口放大后会让 TX 区吃掉全部增量，
@@ -2542,38 +2744,99 @@ $form.Add_Shown({
                 flush_pending_display_entries -DrainAll
                 [System.Windows.Forms.Application]::DoEvents()
                 write_theme_audit -path $script:shot_audit
-                $bounds = $form.Bounds
-                $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-                if ($ShotMode -eq 'screen') {
-                    # 真实抓屏：DrawToBitmap 对 ComboBox/滚动条/复选框一律渲染成
-                    # 纯白块或纯黑块，完全不可信；只有抓屏能拍到它们的真实像素。
-                    # 代价是窗口必须真的在屏幕上且不被遮挡，所以先置顶。
-                    $form.TopMost = $true
-                    $form.Activate()
-                    [System.Windows.Forms.Application]::DoEvents()
-                    Start-Sleep -Milliseconds 500
-                    $bounds = $form.Bounds
-                    $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-                    $g = [System.Drawing.Graphics]::FromImage($bmp)
-                    $g.CopyFromScreen($bounds.Left, $bounds.Top, 0, 0, (New-Object System.Drawing.Size($bounds.Width, $bounds.Height)))
-                    $g.Dispose()
+                if ($ShotMode -eq 'demo') {
+                    inject_demo_log_data
+                }
+                if ($ShotMode -eq 'demo') {
+                    capture_window_png -win $form -path $script:shot_target
                 }
                 else {
-                    $g = [System.Drawing.Graphics]::FromImage($bmp)
-                    $form.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle(0, 0, $bounds.Width, $bounds.Height)))
-                    $g.Dispose()
+                    $bounds = $form.Bounds
+                    $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+                    if ($ShotMode -eq 'screen') {
+                        # 真实抓屏：DrawToBitmap 对 ComboBox/滚动条/复选框一律渲染成
+                        # 纯白块或纯黑块，完全不可信；只有抓屏能拍到它们的真实像素。
+                        # 代价是窗口必须真的在屏幕上且不被遮挡，所以先置顶。
+                        $form.TopMost = $true
+                        $form.Activate()
+                        [System.Windows.Forms.Application]::DoEvents()
+                        Start-Sleep -Milliseconds 500
+                        $bounds = $form.Bounds
+                        $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+                        $g = [System.Drawing.Graphics]::FromImage($bmp)
+                        $g.CopyFromScreen($bounds.Left, $bounds.Top, 0, 0, (New-Object System.Drawing.Size($bounds.Width, $bounds.Height)))
+                        $g.Dispose()
+                    }
+                    else {
+                        $g = [System.Drawing.Graphics]::FromImage($bmp)
+                        $form.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle(0, 0, $bounds.Width, $bounds.Height)))
+                        $g.Dispose()
+                    }
+                    $dir = Split-Path -Parent $script:shot_target
+                    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+                        [void](New-Item -ItemType Directory -Path $dir -Force)
+                    }
+                    $bmp.Save($script:shot_target, [System.Drawing.Imaging.ImageFormat]::Png)
+                    $bmp.Dispose()
+                    [System.IO.File]::AppendAllText(
+                        [System.IO.Path]::ChangeExtension($ShotPath, '.breadcrumb.txt'),
+                        ('png saved: ' + (Test-Path -LiteralPath $script:shot_target) + "`r`n"),
+                        [System.Text.UTF8Encoding]::new($false))
+                    Write-Output ('SHOT_SAVED {0} {1}x{2}' -f $script:shot_target, $bounds.Width, $bounds.Height)
                 }
-                $dir = Split-Path -Parent $script:shot_target
-                if ($dir -and -not (Test-Path -LiteralPath $dir)) {
-                    [void](New-Item -ItemType Directory -Path $dir -Force)
+                if ($ShotMode -eq 'demo') {
+                    # 演示模式续拍：波形窗（FireWater 三通道正弦）+ Modbus 插件（预填 Watch 表的监视页）
+                    try {
+                        open_wave_window
+                        $script:wave_protocol = 'FireWater'
+                        reset_wave_buffers
+                        reset_wave_decoder
+                        for ($i = 0; $i -lt 420; $i++) {
+                            $demo_line = ('{0},{1},{2}' -f ([Math]::Sin($i / 15.0) * 2.0), ([Math]::Cos($i / 7.0)), (($i % 48) / 6.0)) + "`n"
+                            append_received_bytes -bytes ([System.Text.Encoding]::UTF8.GetBytes($demo_line))
+                        }
+                        for ($k = 0; $k -lt 18; $k++) {
+                            [System.Windows.Forms.Application]::DoEvents()
+                            Start-Sleep -Milliseconds 40
+                        }
+                        capture_window_png -win $script:wave_form -path ([System.IO.Path]::ChangeExtension($script:shot_target, '.wave.png'))
+
+                        if (-not (Get-Command show_modbus_panel -ErrorAction SilentlyContinue)) {
+                            . (Join-Path $script:app_root 'plugins\modbus_rtu\plugin.ps1')
+                        }
+                        show_modbus_panel
+                        $demo_watch = @(
+                            @{ Name = '温度传感'; Slave = 1; Fc = 3; Start = 0; Count = 2; Decode = '十进制'; LastValue = '41.5, 3.91'; LastStatus = 'OK' },
+                            @{ Name = 'CPU 负载'; Slave = 1; Fc = 3; Start = 10; Count = 1; Decode = '十进制'; LastValue = '23'; LastStatus = 'OK' },
+                            @{ Name = '输出线圈'; Slave = 1; Fc = 1; Start = 0; Count = 8; Decode = '十进制'; LastValue = '1,0,1'; LastStatus = 'OK' }
+                        )
+                        foreach ($d in $demo_watch) {
+                            $demo_item = [pscustomobject]@{
+                                Key = (get_modbus_watch_key -slave $d.Slave -fc $d.Fc -start $d.Start)
+                                Name = $d.Name
+                                Slave = $d.Slave
+                                Fc = $d.Fc
+                                Start = $d.Start
+                                Count = $d.Count
+                                Decode = $d.Decode
+                                LastValue = $d.LastValue
+                                LastStatus = $d.LastStatus
+                            }
+                            [void](upsert_modbus_watch_item -list $script:modbus_watch_items -item $demo_item)
+                        }
+                        rebuild_modbus_watch_grid
+                        $script:modbus_tab_ctrl.SelectedIndex = 1
+                        [System.Windows.Forms.Application]::DoEvents()
+                        Start-Sleep -Milliseconds 400
+                        capture_window_png -win $script:modbus_form -path ([System.IO.Path]::ChangeExtension($script:shot_target, '.modbus.png'))
+                        if ($script:modbus_form -and -not $script:modbus_form.IsDisposed) {
+                            $script:modbus_form.Close()
+                        }
+                    }
+                    catch {
+                        Write-Output ('DEMO_FAIL {0}' -f $_.Exception.Message)
+                    }
                 }
-                $bmp.Save($script:shot_target, [System.Drawing.Imaging.ImageFormat]::Png)
-                $bmp.Dispose()
-                [System.IO.File]::AppendAllText(
-                    [System.IO.Path]::ChangeExtension($ShotPath, '.breadcrumb.txt'),
-                    ('png saved: ' + (Test-Path -LiteralPath $script:shot_target) + "`r`n"),
-                    [System.Text.UTF8Encoding]::new($false))
-                Write-Output ('SHOT_SAVED {0} {1}x{2}' -f $script:shot_target, $bounds.Width, $bounds.Height)
             }
             catch {
                 [System.IO.File]::AppendAllText(
