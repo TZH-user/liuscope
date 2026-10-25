@@ -117,6 +117,8 @@ class SpectrumPanel(QtWidgets.QWidget):
         self.wf_plot.setMouseEnabled(x=False, y=False)
         self.wf_plot.getAxis('bottom').setLabel('频率 (Hz)')
         self.wf_plot.setLimits(yMin=0, yMax=WF_MAX_ROWS)
+        # 主线语义：最新帧在顶。数据 row0=最新，pyqtgraph 默认 y=0 在底，必须反转 y 轴
+        self.wf_plot.invertY(True)
         self._wf_image = pg.ImageItem()
         self.wf_plot.addItem(self._wf_image)
         self._wf_image.setLookupTable(

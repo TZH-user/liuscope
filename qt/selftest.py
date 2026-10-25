@@ -1570,6 +1570,7 @@ def test_spectrum_panel():
 
     # 瀑布方向：新行在顶（图像第 0 行 == 最新一行，旧行被顶向下）
     panel.chk_wf.setChecked(True)
+    assert panel.wf_plot.getViewBox().state['yInverted'], 'y 轴必须反转：数据 row0(最新) 视觉在顶部（主线语义）'
     panel.repaint_spectrum()
     top_row = panel._waterfall[0]
     panel.repaint_spectrum()  # 数据没变，但再推进一帧序列
