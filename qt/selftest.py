@@ -843,15 +843,22 @@ def test_control_channel():
     assert lines[2]['lines'][0]['text'] == '3|err'
     channel.stop()
 
-    # 主窗体集成：菜单开关 + 真实 api
+    # 主窗体集成：默认开启 + 复制接入信息动作
     win = MainWindow()
     win.show()
     win.wave.state.enabled = True
     win.combo_rx_format.setCurrentText('ASCII')
-    win._control_channel._port = 0  # 测试用临时端口（9101 可能被本机其他进程占用）
-    win.act_control.setChecked(True)  # toggled → start + SYS 公告
-    assert win._control_channel.listening
+    if not win._control_channel.listening:  # 9101 被外部进程占用时兜底临时端口
+        win._control_channel.stop()
+        win._control_channel._port = 0
+        assert win._control_channel.start()
+    assert win._control_channel.listening, '控制通道应默认开启'
     assert 'AI 控制通道已开启' in win.log.toPlainText()
+    # 一键复制接入信息：剪贴板有内容且带通道地址，日志有成功提示
+    win.act_copy_ai.trigger()
+    clip = QtWidgets.QApplication.clipboard().text()
+    assert '127.0.0.1' in clip and 'headless_main.py' in clip and 'read_lines' in clip
+    assert '已复制 AI 接入信息' in win.log.toPlainText()
 
     sock2 = QTcpSocket()
     pump_connect(sock2, win._control_channel.port)
@@ -888,12 +895,11 @@ def test_control_channel():
     assert rpc({'cmd': 'wave_clear'})['ok']
     assert win.wave.state.frame_count == 0
 
-    win.act_control.setChecked(False)
-    assert not win._control_channel.listening
     sock2.close()
     win.wave.btn_sim.setChecked(False)
     win._port_watch_timer.stop()
     win.close()
+    assert not win._control_channel.listening, '关窗应停掉控制通道（释放端口）'
     print('CONTROL CHANNEL OK')
 
 

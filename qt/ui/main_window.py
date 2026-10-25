@@ -250,15 +250,22 @@ class MainWindow(QtWidgets.QMainWindow):
         act_about = QtGui.QAction('关于', self)
         act_about.triggered.connect(self._show_about)
         menu_help.addAction(act_about)
-        # AI 控制通道（TCP JSON 行协议，默认 127.0.0.1:9101）
+        # AI 控制通道（TCP JSON 行协议，默认开启；端口被占则提示但不影响工具）
         self._control_api = self._build_control_api()
         self._control_channel = ControlChannel(self._control_api, parent=self)
-        self.act_control = QtGui.QAction('AI 控制通道 (127.0.0.1:9101)', self)
-        self.act_control.setCheckable(True)
-        self.act_control.setToolTip('开启后 AI/脚本可通过 TCP JSON 行协议控制本工具：'
-                                    'ping/status/send/read_lines/wave_snapshot/…')
-        self.act_control.toggled.connect(self._on_control_toggled)
-        menu_help.addAction(self.act_control)
+        if self._control_channel.start():
+            self._append_log('SYS',
+                             f'AI 控制通道已开启: tcp://127.0.0.1:{self._control_channel.port}'
+                             '（JSON 行协议: ping/status/send/read_lines/wave_snapshot/'
+                             'set_protocol/wave_clear/wave_sim/record/list_ports）')
+        else:
+            self._append_log('SYS', 'AI 控制通道端口被占用，未开启（可能已有实例在运行）')
+        self.act_copy_ai = QtGui.QAction('复制 AI 接入信息', self)
+        self.act_copy_ai.setToolTip(
+            '把控制通道地址、JSON 命令一览与无头模式用法复制到剪贴板，'
+            '直接粘贴给其他 AI/脚本即可接入')
+        self.act_copy_ai.triggered.connect(self._copy_ai_info)
+        menu_help.addAction(self.act_copy_ai)
         self._update_check_fn = check_app_update  # 测试可注入替换
 
         # 启动更新检查：24h 节流（对齐主线），延迟 3s 等界面稳定
@@ -436,19 +443,24 @@ class MainWindow(QtWidgets.QMainWindow):
                           set_protocol=set_protocol, wave_clear=wave_clear,
                           wave_sim=wave_sim, record=record)
 
-    def _on_control_toggled(self, on: bool):
-        if on:
-            if self._control_channel.start():
-                self._append_log('SYS',
-                                 f'AI 控制通道已开启: tcp://127.0.0.1:{self._control_channel.port}'
-                                 '（JSON 行协议: ping/status/send/read_lines/wave_snapshot/'
-                                 'set_protocol/wave_clear/wave_sim/record/list_ports）')
-            else:
-                self._append_log('SYS', 'AI 控制通道启动失败（端口可能被占用）')
-                self.act_control.setChecked(False)
-        else:
-            self._control_channel.stop()
-            self._append_log('SYS', 'AI 控制通道已关闭。')
+    def _copy_ai_info(self):
+        """一键复制 AI 接入信息（控制通道 + 无头模式），粘贴给其他 AI 即可用。"""
+        port = self._control_channel.port if self._control_channel.listening else 9101
+        text = (
+            '【RK3562 串口收发工具 V6 (Qt) AI 接入】\n'
+            f'1) 控制通道（与 GUI 共存）: TCP 127.0.0.1:{port}，'
+            '每行发一个 JSON 请求，逐行收 JSON 响应。\n'
+            '   命令: {"cmd":"ping"} | {"cmd":"status"} | {"cmd":"list_ports"} | '
+            '{"cmd":"send","text":"AT"} | {"cmd":"read_lines","count":50,"filter":"err"} | '
+            '{"cmd":"wave_snapshot","count":100} | {"cmd":"set_protocol","protocol":"JustFloat"} | '
+            '{"cmd":"wave_clear"} | {"cmd":"wave_sim","on":true} | {"cmd":"record","on":true}\n'
+            '2) 无头模式（AI 独占串口不开界面）: '
+            'python qt/headless_main.py --port COM9 --baud 115200 --protocol FireWater '
+            '--duration 5 --record\n'
+            '   协议: FireWater/JustFloat/RawData；退出码 0 正常 | 2 错误模式命中 | '
+            '3 期望失败 | 4 复位失败 | 5 烧录失败\n')
+        QtWidgets.QApplication.clipboard().setText(text)
+        self._append_log('SYS', '已复制 AI 接入信息到剪贴板，可直接粘贴给其他 AI/脚本')
 
     def _show_about(self):
         QtWidgets.QMessageBox.about(
