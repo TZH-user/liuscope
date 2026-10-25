@@ -107,6 +107,13 @@ class WaveWindow(QtWidgets.QWidget):
                                '格线正方用于目检正交性')
         self.btn_xy.toggled.connect(self._on_xy_toggled)
 
+        self.btn_record = QtWidgets.QPushButton('录制')
+        self.btn_record.setObjectName('tool')
+        self.btn_record.setCheckable(True)
+        self.btn_record.setToolTip('把串口原始字节流录制成 JSONL（logs/session_record_*.jsonl），'
+                                   '主窗体「帮助→回放会话录制」可重放')
+        self.btn_record.toggled.connect(self._on_record_toggled)
+
         # ---- 场景预设（波特率+协议+滤波+Y 量程+窗口 一键切换；文件在仓库根） ----
         self.presets_path = default_presets_path()
         self.baud_getter = lambda: ''   # 主窗体注入：读当前波特率
@@ -137,6 +144,7 @@ class WaveWindow(QtWidgets.QWidget):
         toolbar.addWidget(self.btn_csv)
         toolbar.addWidget(self.btn_format)
         toolbar.addWidget(self.btn_xy)
+        toolbar.addWidget(self.btn_record)
         toolbar.addWidget(QtWidgets.QLabel('预设'))
         toolbar.addWidget(self.combo_preset)
         toolbar.addWidget(self.btn_preset_save)
@@ -256,6 +264,21 @@ class WaveWindow(QtWidgets.QWidget):
             self.xy_section.start()
         else:
             self.xy_section.stop()
+
+    def _on_record_toggled(self, on: bool):
+        # 录制实际由主窗体管理（字节流入口在那边）；这里只管按钮外观
+        main = self.parent()
+        while main is not None and not isinstance(main, QtWidgets.QMainWindow):
+            main = main.parent()
+        path = None
+        if main is not None and hasattr(main, 'toggle_session_record'):
+            path = main.toggle_session_record(on)
+        self.btn_record.setText('停止录制' if self.btn_record.isChecked() else '录制')
+        if on and path:
+            self.btn_record.setToolTip(f'录制中: {path}')
+        else:
+            self.btn_record.setToolTip('把串口原始字节流录制成 JSONL（logs/session_record_*.jsonl），'
+                                       '主窗体「帮助→回放会话录制」可重放')
 
     def clear_buffers(self):
         self._sim_t = 0.0

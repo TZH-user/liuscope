@@ -644,6 +644,83 @@ def test_xy_view():
     print('XY VIEW OK')
 
 
+def test_session_record():
+    """C13：会话录制 JSONL + 回放重放进接收管线。"""
+    import json
+    import os
+    import tempfile
+
+    from PySide6 import QtWidgets
+
+    import ui.main_window as mw
+    from core.session_record import SessionRecorder, load_replay_chunks
+
+    tmp_dir = tempfile.mkdtemp(prefix='qt_record_')
+    recorder = SessionRecorder(tmp_dir)
+    path = recorder.start()
+    assert recorder.active and path.endswith('.jsonl')
+    recorder.record_chunk(b'1,2\n')
+    recorder.record_chunk(b'3,4\n')
+    recorder.stop()
+    assert not recorder.active
+    chunks = load_replay_chunks(path)
+    assert [c[1] for c in chunks] == [b'1,2\n', b'3,4\n']
+    assert all(isinstance(c[0], int) for c in chunks)
+    with open(path, encoding='utf-8') as f:
+        rec = json.loads(f.readline())
+    assert rec['dir'] == 'DATA' and rec['n'] == 4 and rec['b64']
+    assert load_replay_chunks(os.path.join(tmp_dir, 'nope.jsonl')) == []
+
+    # 主窗体集成：录制 → 收数 → 停止 → 回放进管线
+    old_get_log_dir = mw.get_log_dir
+    real_recorder_cls = mw.SessionRecorder
+    stamps = iter(['20261024_000001', '20261024_000002'])
+    mw.SessionRecorder = lambda d: real_recorder_cls(d, stamp_fn=lambda: next(stamps))
+    mw.get_log_dir = lambda: tmp_dir
+    try:
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+        win = mw.MainWindow()
+        win.show()
+        win.wave.state.enabled = True
+        win.combo_rx_format.setCurrentText('ASCII')
+        assert win.toggle_session_record(True) is not None
+        assert win.recorder.active
+        win.ingest_bytes(b'hello-rec\n')
+        win.ingest_bytes(b'7.5,2.5\n')
+        win.toggle_session_record(False)
+        assert not win.recorder.active
+
+        record_path = win.recorder.path
+        assert load_replay_chunks(record_path)[0][1] == b'hello-rec\n'
+
+        # 回放：逐块喂回，波形/日志都能看到
+        win.clear_log()
+        win.wave.state.reset_buffers()
+        win._start_replay(record_path)
+        assert win._replay_state is not None
+        while win._replay_step():
+            pass
+        assert win._replay_state is None, '回放完自动收尾'
+        assert 'hello-rec' in win.log.toPlainText()
+        assert win.wave.state.frame_total == 1, '回放数据应进波形管线'
+        assert '会话回放完成' in win.log.toPlainText()
+        # 回放期间录制按钮开着也不会套娃
+        win.toggle_session_record(True)
+        path2 = win.recorder.path
+        win._start_replay(record_path)
+        while win._replay_step():
+            pass
+        win.toggle_session_record(False)
+        assert load_replay_chunks(path2) == [], '回放不再录自己'
+        assert len(load_replay_chunks(record_path)) == 2, '原录制文件不被第二次录制覆盖'
+        win._port_watch_timer.stop()
+        win.close()
+    finally:
+        mw.get_log_dir = old_get_log_dir
+        mw.SessionRecorder = real_recorder_cls
+    print('SESSION RECORD OK')
+
+
 def test_wave_protocols():
     """三协议解码 + 视图模型 + 滤波 + 快照合同（对齐主线 SelfTest 断言口径）。"""
     import struct
@@ -1236,6 +1313,7 @@ def run_selftest() -> int:
     test_fault_decode_and_ai_doc()
     test_wave_presets()
     test_xy_view()
+    test_session_record()
     test_wave_protocols()
     test_wave_window()
     test_main_window_m3()

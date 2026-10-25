@@ -24,6 +24,7 @@ from core.ports import (port_display_text, port_name_from_display,
                         pick_auto_connect_port, scan_port_infos)
 from core.rx_buffer import RxBuffer
 from core.serial_worker import SerialWorker
+from core.session_record import SessionRecorder, load_replay_chunks
 from core.settings import read_setting, write_setting
 from core.update_check import RELEASES_PAGE, check_app_update
 from ui.find_bar import FindBar
@@ -90,6 +91,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._known_port_names: list[str] | None = None  # 热插拔基线（None=还没首扫）
         self._connected_device = ''
         self._auto_log = AutoLogWriter(get_log_dir())
+        self.recorder = SessionRecorder(get_log_dir())
+        self._replay_state: dict | None = None
 
         # ---- 顶部连接行 ----
         self.combo_port = QtWidgets.QComboBox()
@@ -234,11 +237,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._restore_connect_settings()
         self.start_port_watch()
 
-        # ---- 帮助菜单：检查更新 / 关于 ----
+        # ---- 帮助菜单：检查更新 / 回放录制 / 关于 ----
         menu_help = self.menuBar().addMenu('帮助')
         act_check = QtGui.QAction('检查更新', self)
         act_check.triggered.connect(lambda: self._run_update_check(manual=True))
         menu_help.addAction(act_check)
+        act_replay = QtGui.QAction('回放会话录制…', self)
+        act_replay.setToolTip('选择录制生成的 JSONL 文件，把当时的字节流重放进接收管线')
+        act_replay.triggered.connect(self._replay_from_dialog)
+        menu_help.addAction(act_replay)
         act_about = QtGui.QAction('关于', self)
         act_about.triggered.connect(self._show_about)
         menu_help.addAction(act_about)
@@ -320,6 +327,12 @@ class MainWindow(QtWidgets.QMainWindow):
         elif manual:
             self._append_log('SYS', f"检查更新失败: {result.get('note', '')}")
         # 自动检查失败静默（对齐主线）
+
+    def _replay_from_dialog(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, '选择会话录制文件', get_log_dir(), '会话录制 (*.jsonl);;所有文件 (*.*)')
+        if path:
+            self._start_replay(path)
 
     def _show_about(self):
         QtWidgets.QMessageBox.about(
@@ -448,6 +461,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, '_port_watch_timer', None):
             self._port_watch_timer.stop()
         self._auto_log.close()
+        self.recorder.stop()
         self.wave.stop_timers()
         self.spectrum.stop_timers()
         self._stop_file_send('窗口关闭')
@@ -460,6 +474,9 @@ class MainWindow(QtWidgets.QMainWindow):
         now = time.monotonic()
         self.rx_bytes_total += len(data)
         self._update_stats_label()
+        if self.recorder.active and self._replay_state is None:
+            # 回放期间不再录自己（避免回放套娃）
+            self.recorder.record_chunk(data)
         if self.combo_rx_format.currentText() == 'HEX':
             # 对齐主线：HEX 显示模式按到达块直接落显；先清掉未成行的文本残行
             tail = self.buffer.drain()
@@ -571,6 +588,61 @@ class MainWindow(QtWidgets.QMainWindow):
     def _update_backlog(self):
         total = self.buffer.backlog_bytes + self.wave.state.backlog_bytes
         self.lbl_backlog.setText(f'积压 {total} B')
+
+    # ---------- 会话录制 / 回放 ----------
+
+    REPLAY_INTERVAL_MS = 10
+
+    def toggle_session_record(self, on: bool) -> str | None:
+        """波形窗「录制」按钮的实际执行方。返回录制文件路径（停止时 None）。"""
+        if on:
+            path = self.recorder.start()
+            self._append_log('SYS', f'会话录制开始: {path}')
+            return path
+        if self.recorder.active:
+            self.recorder.stop()
+            self._append_log('SYS', '会话录制结束。')
+        return None
+
+    def _start_replay(self, path: str):
+        """回放录制文件：按录制顺序逐块定时喂回接收管线（不重新录制）。"""
+        if self._replay_state is not None:
+            self.set_status('已在回放中', 'status_err')
+            return
+        chunks = load_replay_chunks(path)
+        if not chunks:
+            self._append_log('SYS', f'回放文件没有可重放的数据块: {path}')
+            return
+        self._replay_state = {'chunks': chunks, 'index': 0, 'path': path}
+        self._replay_timer = QtCore.QTimer(self)
+        self._replay_timer.setInterval(self.REPLAY_INTERVAL_MS)
+        self._replay_timer.timeout.connect(self._replay_step)
+        self._replay_timer.start()
+        self._append_log('SYS', f'会话回放开始: {path}（{len(chunks)} 块）')
+
+    def _replay_step(self) -> bool:
+        """喂下一块。返回是否还有剩余（测试可手工循环调用）。"""
+        state = self._replay_state
+        if state is None:
+            return False
+        if state['index'] >= len(state['chunks']):
+            self._stop_replay()
+            return False
+        _ms, data = state['chunks'][state['index']]
+        state['index'] += 1
+        self.ingest_bytes(data)
+        if state['index'] >= len(state['chunks']):
+            self._stop_replay()
+            return False
+        return True
+
+    def _stop_replay(self):
+        state = self._replay_state
+        self._replay_state = None
+        if getattr(self, '_replay_timer', None):
+            self._replay_timer.stop()
+        if state:
+            self._append_log('SYS', f"会话回放完成: {state['path']}（{state['index']} 块）")
 
     # ---------- 日志 / 发送 ----------
 
