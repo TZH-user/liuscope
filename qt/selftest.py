@@ -555,6 +555,95 @@ def test_wave_presets():
     print('WAVE PRESETS OK')
 
 
+def test_xy_view():
+    """C11：XY 相位图——余晖衰减/常驻/关、固定与自适应量程、清缓冲重置、窗口数切换。"""
+    import numpy as np
+
+    from core.wave_state import WaveState
+    from ui.xy_view import (CELL_SIZE, XYCell, XYSection, adaptive_span,
+                            persist_seconds, span_half)
+
+    # 档位映射（对齐主线 get_wave_xy_persist_seconds / get_wave_xy_span_half）
+    assert persist_seconds('0') == 0.0 and persist_seconds('1s') == 1.0
+    assert persist_seconds('常驻') == -1.0 and persist_seconds('5s') == 5.0
+    assert span_half('±8') == 8 and span_half('自适应') == 0
+
+    # 自适应量程：2 的幂量化防抖
+    assert adaptive_span(np.array([3.0, -4.0])) == 4.0
+    assert adaptive_span(np.array([4.1])) == 8.0
+    assert adaptive_span(np.zeros(0)) == 8.0
+
+    cell = XYCell(0)
+    # 固定量程 ±8：值 (0,0) 落中心，(8,0) 落右缘
+    cell.feed(np.array([0.0]), np.array([0.0]))
+    cell.tick(0.05)
+    center = cell._accum[CELL_SIZE // 2, CELL_SIZE // 2]
+    assert center == 1.0
+    cell.feed(np.array([8.0]), np.array([0.0]))
+    cell.tick(0.05)
+    assert cell._accum[CELL_SIZE // 2, CELL_SIZE - 1] == 1.0
+    # Y 轴向上：+8 落顶缘（映射式上下各留 1px 内缩）
+    cell.feed(np.array([0.0]), np.array([8.0]))
+    cell.tick(0.05)
+    assert cell._accum[1, CELL_SIZE // 2] == 1.0
+
+    # 余晖 1s：50ms 衰减但仍亮；常驻不衰减；0 每帧清
+    cell2 = XYCell(0)
+    cell2.set_persist_option('1s')
+    cell2.feed(np.array([1.0]), np.array([1.0]))
+    cell2.tick(0.05)
+    v1 = float(cell2._accum.max())
+    cell2.tick(0.05)
+    v2 = float(cell2._accum.max())
+    assert 0 < v2 < v1, '余晖应逐帧衰减'
+    cell2.set_persist_option('常驻')
+    cell2.tick(0.5)
+    assert float(cell2._accum.max()) == v2, '常驻不衰减'
+    cell2.set_persist_option('0')
+    cell2.tick(0.05)
+    assert not cell2._accum.any(), '余晖关闭每帧清屏'
+
+    # 清像素
+    cell.clear_pixels()
+    assert not cell._accum.any()
+    # 渲染冒烟：paintEvent 里 numpy→QImage 映射不抛
+    cell.feed(np.array([-6.0, 6.0]), np.array([3.0, -3.0]))
+    cell.tick(0.05)
+    assert not cell.grab().isNull()
+
+    # 区块联动：进帧 → tick → 分配到窗 1（X=CH0,Y=CH1）
+    st = WaveState()
+    st.enabled = True
+    st.consume_bytes(b'1,2\n2,4\n3,6\n')
+    section = XYSection(st)
+    section.combo_count.setCurrentText('2')
+    assert len(section._cells) == 2
+    section.tick()
+    assert section._cells[0]._accum.any(), '窗 1 应收到 CH0/CH1 点'
+    # 改配对 X=CH1,Y=CH0 后换数据可收
+    section._slot_x[0].setCurrentIndex(1)
+    section._slot_y[0].setCurrentIndex(0)
+    st.consume_bytes(b'5,7\n')
+    section.tick()
+    assert section._cells[0]._accum.any()
+
+    # 清缓冲后 frame_count 回 0 → 累积重置
+    section._last_total = st.frame_count
+    st.reset_buffers()
+    section.tick()
+    assert section._last_total == 0
+
+    # 波形窗开关联动
+    from ui.wave_window import WaveWindow
+    wave = WaveWindow()
+    wave.btn_xy.setChecked(True)
+    assert wave.xy_section.isVisibleTo(wave)
+    wave.btn_xy.setChecked(False)
+    assert not wave.xy_section.isVisibleTo(wave)
+    wave.stop_timers()
+    print('XY VIEW OK')
+
+
 def test_wave_protocols():
     """三协议解码 + 视图模型 + 滤波 + 快照合同（对齐主线 SelfTest 断言口径）。"""
     import struct
@@ -1146,6 +1235,7 @@ def run_selftest() -> int:
     test_log_hover()
     test_fault_decode_and_ai_doc()
     test_wave_presets()
+    test_xy_view()
     test_wave_protocols()
     test_wave_window()
     test_main_window_m3()

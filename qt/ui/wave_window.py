@@ -26,6 +26,7 @@ from core.ai_doc import get_ai_format_doc
 from core.settings import read_setting, write_setting
 from core.wave_presets import WavePreset, default_presets_path, load_wave_presets, save_wave_presets
 from core.wave_state import FILTERS, PROTOCOLS, WaveState
+from ui.xy_view import XYSection
 
 CURVE_COLORS = ['#4EC9B0', '#569CD6', '#CE9178', '#C586C0',
                 '#DCDCAA', '#F48771', '#9CDCFE', '#D4D4D4']
@@ -99,6 +100,13 @@ class WaveWindow(QtWidgets.QWidget):
         self.btn_format.setToolTip('三协议数据格式速查；一键复制给 AI 的接入说明')
         self.btn_format.clicked.connect(self._show_format_dialog)
 
+        self.btn_xy = QtWidgets.QPushButton('XY相位图')
+        self.btn_xy.setObjectName('tool')
+        self.btn_xy.setCheckable(True)
+        self.btn_xy.setToolTip('IQ 李萨如/星座图：1~4 个正方格窗口，余晖累积，'
+                               '格线正方用于目检正交性')
+        self.btn_xy.toggled.connect(self._on_xy_toggled)
+
         # ---- 场景预设（波特率+协议+滤波+Y 量程+窗口 一键切换；文件在仓库根） ----
         self.presets_path = default_presets_path()
         self.baud_getter = lambda: ''   # 主窗体注入：读当前波特率
@@ -128,6 +136,7 @@ class WaveWindow(QtWidgets.QWidget):
         toolbar.addWidget(self.btn_sim)
         toolbar.addWidget(self.btn_csv)
         toolbar.addWidget(self.btn_format)
+        toolbar.addWidget(self.btn_xy)
         toolbar.addWidget(QtWidgets.QLabel('预设'))
         toolbar.addWidget(self.combo_preset)
         toolbar.addWidget(self.btn_preset_save)
@@ -158,6 +167,10 @@ class WaveWindow(QtWidgets.QWidget):
         self.chip_layout.addStretch(1)
         self.chip_area.setWidget(self.chip_host)
 
+        # ---- XY 相位图区（默认隐藏，工具行按钮开关） ----
+        self.xy_section = XYSection(self.state)
+        self.xy_section.setVisible(False)
+
         yrow = QtWidgets.QHBoxLayout()
         yrow.addWidget(self.chk_auto_y)
         yrow.addWidget(self.edit_ymin)
@@ -179,6 +192,7 @@ class WaveWindow(QtWidgets.QWidget):
         layout.setSpacing(4)
         layout.addLayout(toolbar)
         layout.addLayout(yrow)
+        layout.addWidget(self.xy_section)
         layout.addWidget(self.plot, 1)
         layout.addWidget(self.lbl_stats)
 
@@ -234,6 +248,14 @@ class WaveWindow(QtWidgets.QWidget):
             self._sim_timer.start(self.SIM_INTERVAL_MS)
         else:
             self._sim_timer.stop()
+
+    def _on_xy_toggled(self, on: bool):
+        self.xy_section.setVisible(on)
+        if on:
+            self.xy_section.refresh_channels()
+            self.xy_section.start()
+        else:
+            self.xy_section.stop()
 
     def clear_buffers(self):
         self._sim_t = 0.0
@@ -563,6 +585,7 @@ RawData（原始字节流）
         self._repaint_timer.stop()
         self._stats_timer.stop()
         self._sim_timer.stop()
+        self.xy_section.stop()
 
     def showEvent(self, event):  # noqa: N802 (Qt 命名)
         self._restore_channel_names()
