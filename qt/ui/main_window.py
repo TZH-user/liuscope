@@ -27,6 +27,7 @@ from core.settings import read_setting, write_setting
 from core.update_check import RELEASES_PAGE, check_app_update
 from ui.find_bar import FindBar
 from ui.history_edit import HistoryLineEdit
+from ui.log_hover import LogHoverTip
 from ui.modbus_panel import ModbusPanel
 from ui.spectrum_panel import SpectrumPanel
 from ui.theme import RX_COLOR, SYS_COLOR, TIME_COLOR, TX_COLOR
@@ -122,6 +123,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log = QtWidgets.QTextEdit()
         self.log.setReadOnly(True)
         self.log.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
+        self.log.setToolTip('RX 日志：悬停任意行 0.4 秒自动 HEX⇄文本/十进制/float32 互转；'
+                            'Ctrl+F 查找与时间戳定位')
+        self._log_hover = LogHoverTip(self.log)
         self.find_bar = FindBar(self.log)
         self.find_bar.setVisible(False)
 

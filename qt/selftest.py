@@ -379,6 +379,63 @@ def test_auto_log_export():
     print('AUTO LOG OK')
 
 
+def test_log_hover():
+    """B8：行悬停 HEX⇄文本/十进制/float32 互转（对齐主线 get_line_alt_format_tooltip）。"""
+    from PySide6 import QtWidgets
+
+    import struct as _struct
+
+    from core.text_format import alt_format_tooltip
+    from ui.log_hover import tooltip_for_position
+    from ui.main_window import MainWindow
+
+    # HEX 行 → 文本 + 十进制 + float32
+    tip = alt_format_tooltip('41 42 43 44')
+    assert tip.startswith('文本(UTF-8): ABCD')
+    assert '十进制: 65 66 67 68' in tip
+    expect_float = f'{_struct.unpack("<f", bytes.fromhex("41424344"))[0]:.6g}'
+    assert f'float32(小端): {expect_float}' in tip
+
+    # 非 4 倍数长 HEX：不给 float32
+    assert 'float32' not in alt_format_tooltip('41 42')
+    # 控制字节转义与不可见符
+    tip = alt_format_tooltip('0D 0A 01')
+    assert '<CR><LF>·' in tip
+    # 短 token 不当 HEX（误判率太高）
+    assert alt_format_tooltip('AB') == 'HEX: 41 42'
+    assert alt_format_tooltip('OK') == 'HEX: 4F 4B'
+    # 文本行 → UTF-8 HEX；超 64 字节截断加省略号
+    assert alt_format_tooltip('hello') == 'HEX: 68 65 6C 6C 6F'
+    long_line = 'x' * 100
+    tip = alt_format_tooltip(long_line)
+    assert tip.startswith('HEX: 78 78') and tip.endswith('…')
+    # 空/非日志行不给提示
+    assert alt_format_tooltip('') == ''
+    assert alt_format_tooltip('1 2 3') == alt_format_tooltip('1 2 3')  # 2字符 token 走文本
+
+    # 主窗体日志块：HEX 条目正文、文本条目正文都能出提示
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
+    win.wave.state.enabled = False
+    win.combo_rx_format.setCurrentText('ASCII')
+    win._append_log('RX', '41 42 43 44')
+    win._append_log('RX', 'hello-ascii')
+    doc = win.log.document()
+    hex_tip = ascii_tip = ''
+    for i in range(doc.blockCount()):
+        tip = tooltip_for_position(win.log, i)
+        if tip.startswith('文本(UTF-8)'):
+            hex_tip = tip
+        elif tip.startswith('HEX: 68'):
+            ascii_tip = tip
+    assert 'ABCD' in hex_tip and 'float32' in hex_tip
+    assert ascii_tip.startswith('HEX: 68 65 6C')
+    win._port_watch_timer.stop()
+    win.close()
+    print('LOG HOVER OK')
+
+
 def test_wave_protocols():
     """三协议解码 + 视图模型 + 滤波 + 快照合同（对齐主线 SelfTest 断言口径）。"""
     import struct
@@ -967,6 +1024,7 @@ def run_selftest() -> int:
     test_ports_watch()
     test_find_time_mode()
     test_auto_log_export()
+    test_log_hover()
     test_wave_protocols()
     test_wave_window()
     test_main_window_m3()
