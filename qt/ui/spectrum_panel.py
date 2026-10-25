@@ -138,8 +138,6 @@ class SpectrumPanel(QtWidgets.QWidget):
         layout.addLayout(prow)
         layout.addLayout(drow)
         layout.addWidget(self.plot, 3)
-        self.lbl_wf = QtWidgets.QLabel('瀑布图（最新在顶）')
-        layout.addWidget(self.lbl_wf)
         layout.addWidget(self.wf_plot, 1)
         layout.addWidget(self.lbl_peak)
         layout.addWidget(self.lbl_info)
@@ -288,8 +286,6 @@ class SpectrumPanel(QtWidgets.QWidget):
         self._wf_image.setRect(QtCore.QRectF(0, 0, analysis['fs'] / 2.0, len(self._waterfall)))
         self.wf_plot.setXRange(0, analysis['fs'] / 2.0, padding=0)
         self.wf_plot.setYRange(0, len(self._waterfall), padding=0)
-        self.lbl_wf.setText('瀑布图（最新在底）' if self.chk_wf_flip.isChecked()
-                            else '瀑布图（最新在顶）')
 
     def _sync_channels(self):
         count = len(self.wave.ch_values)

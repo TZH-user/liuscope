@@ -1187,6 +1187,37 @@ def test_wave_window():
     wave.repaint_wave()
     assert wave.state.frame_total == 0
 
+    # ---- 历史滑块（主线复刻）：拖动定位历史，最右端=跟随 ----
+    for i in range(3000):
+        wave.state.consume_bytes(f'{i}\n'.encode())
+    wave.repaint_wave()
+    assert wave.slider_view.maximum() > 0, '缓冲超出窗口后滑块应可用'
+    wave._on_slider_moved(20)
+    start, _end, follow = wave.state.view_range()
+    assert not follow and start == 20, '拖到 20 → 历史窗口起点 20'
+    wave._on_slider_moved(wave.slider_view.maximum())
+    _s, _e, follow = wave.state.view_range()
+    assert follow, '拖到最右端 → 恢复跟随'
+    # 滑块与视图同步：历史位置时滑块值=窗口起点
+    wave._on_slider_moved(100)
+    wave.repaint_wave()
+    assert wave.slider_view.value() == 100
+
+    # ---- 滚轮缩放（主线语义） ----
+    # 横轴区滚轮：窗口帧数 ×0.8（跟随态下贴末尾）
+    old_window = int(wave.state.window_frames)
+    wave._apply_window_zoom(True)
+    assert int(wave.state.window_frames) == int(round(old_window * 0.8))
+    assert wave.combo_window.currentText() == str(int(wave.state.window_frames))
+    # 曲线区滚轮：缩 Y（锚点=鼠标处数值），自动Y → 手动
+    wave.chk_auto_y.setChecked(True)
+    wave.repaint_wave()
+    y0, y1 = wave.state.y_range()
+    wave._apply_y_zoom(0.5, True)  # 中心锚点缩 0.8 倍
+    assert not wave.chk_auto_y.isChecked(), '滚轮缩Y自动切手动'
+    assert abs(wave.state.y_min - (y0 + 0.1 * (y1 - y0))) < 1e-6
+    assert abs(wave.state.y_max - (y1 - 0.1 * (y1 - y0))) < 1e-6
+
     win.close()
     print('WAVE WINDOW OK')
 

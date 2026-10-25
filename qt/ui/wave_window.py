@@ -191,6 +191,14 @@ class WaveWindow(QtWidgets.QWidget):
         vb = self.plot.getViewBox()
         vb.sigRangeChangedManually.connect(self._on_manual_range)
         vb.setMouseEnabled(x=True, y=False)  # Y 由自动/手动量程管，鼠标只管 X
+        # 滚轮语义对齐主线：曲线/纵轴区=缩 Y（鼠标处为锚点），横轴区=调显示窗口帧数；
+        # 拦下 pyqtgraph 默认滚轮，由事件过滤器接管
+        self.plot.viewport().installEventFilter(self)
+
+        # ---- 历史浏览滑块（主线同款）：拖动定位视图窗口，最右端=跟随实时 ----
+        self.slider_view = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.slider_view.setEnabled(False)
+        self.slider_view.sliderMoved.connect(self._on_slider_moved)
 
         # ---- 状态行 ----
         self.lbl_stats = QtWidgets.QLabel('帧 0 | 解析失败 0 | FPS 0 | 视图: 跟随')
@@ -202,6 +210,7 @@ class WaveWindow(QtWidgets.QWidget):
         layout.addLayout(yrow)
         layout.addWidget(self.xy_section)
         layout.addWidget(self.plot, 1)
+        layout.addWidget(self.slider_view)
         layout.addWidget(self.lbl_stats)
 
         self._repaint_timer = QtCore.QTimer(self)
@@ -335,6 +344,12 @@ class WaveWindow(QtWidgets.QWidget):
                     if joined:
                         write_setting('wave/channel_names', joined)
             return True
+        # 绘图区滚轮：主线语义（曲线/纵轴区=缩Y以鼠标为锚点，横轴区=调窗口帧数）
+        if obj is self.plot.viewport() and event.type() == QtCore.QEvent.Type.Wheel:
+            if self.btn_xy.isChecked():
+                return True  # XY 模式滚轮不动共享视图状态（主线同款）
+            self._on_plot_wheel(event)
+            return True  # 拦下 pyqtgraph 默认滚轮
         return super().eventFilter(obj, event)
 
     def _on_chip_toggled(self, idx: int, checked: bool):
@@ -397,6 +412,58 @@ class WaveWindow(QtWidgets.QWidget):
         y_min, y_max = st.y_range()
         vb.setYRange(y_min, y_max, padding=0)
         self._syncing = False
+        self._sync_slider()
+
+    # ---------- 历史滑块 / 滚轮缩放（主线复刻） ----------
+
+    def _sync_slider(self):
+        """按当前视图同步滑块位置：跟随=最右端，历史=窗口起点。"""
+        st = self.state
+        start, _end, follow = st.view_range()
+        window = max(st.MIN_WINDOW, int(st.window_frames))
+        span = max(0, int(st.frame_total) - window)
+        self.slider_view.setMaximum(max(0, span))
+        self.slider_view.setPageStep(max(1, window // 2))
+        self.slider_view.setValue(span if follow else max(0, min(start, span)))
+        self.slider_view.setEnabled(span > 0)
+
+    def _on_slider_moved(self, value: int):
+        st = self.state
+        window = max(st.MIN_WINDOW, int(st.window_frames))
+        st.set_view_window(value, value + window)
+
+    def _on_plot_wheel(self, ev):
+        zoom_in = ev.angleDelta().y() > 0
+        pos = ev.position().toPoint()
+        axis_rect = self.plot.getAxis('bottom').geometry()
+        if axis_rect.contains(self.plot.mapToScene(pos)):
+            self._apply_window_zoom(zoom_in)
+        else:
+            frac = pos.y() / max(1, self.plot.viewport().height())
+            self._apply_y_zoom(frac, zoom_in)
+
+    def _apply_window_zoom(self, zoom_in: bool):
+        """横轴区滚轮：显示窗口帧数 ×0.8 / ×1.25（保持窗口中心，主线同款）。"""
+        st = self.state
+        factor = 0.8 if zoom_in else 1.25
+        new_window = int(round(st.window_frames * factor))
+        if new_window != int(st.window_frames):
+            st.set_view_width(new_window)
+            self.combo_window.setCurrentText(str(new_window))
+
+    def _apply_y_zoom(self, frac: float, zoom_in: bool):
+        """曲线/纵轴区滚轮：缩 Y 量程，以鼠标处数值为锚点；自动Y时切手动。"""
+        y0, y1 = self.plot.getViewBox().viewRange()[1]
+        if y1 <= y0:
+            return
+        anchor = y1 - min(max(frac, 0.0), 1.0) * (y1 - y0)
+        factor = 0.8 if zoom_in else 1.25
+        self.state.y_min = anchor + (y0 - anchor) * factor
+        self.state.y_max = anchor + (y1 - anchor) * factor
+        if self.chk_auto_y.isChecked():
+            self.chk_auto_y.setChecked(False)
+        self.edit_ymin.setText(f'{self.state.y_min:.6g}')
+        self.edit_ymax.setText(f'{self.state.y_max:.6g}')
 
     def _on_manual_range(self):
         if self._syncing:
