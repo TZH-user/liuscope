@@ -52,6 +52,11 @@ def test_main_window():
     win = MainWindow()
     win.show()
     win.wave.state.enabled = False  # 本测试只看终端管线，波形侧不参与积压
+    # 设置记忆会恢复本机 ini 的收发格式；终端管线用例统一按 ASCII 口径来
+    win.combo_rx_format.setCurrentText('ASCII')
+    win.combo_tx_format.setCurrentText('ASCII')
+
+    # 完整行立即吐出，残行留在缓冲
     win.ingest_bytes(b'boot v1.0\n')
     win.ingest_bytes(b'temp=41.5\n')
     win.ingest_bytes(b'no_newline_tail')
@@ -90,6 +95,7 @@ def test_terminal_chrome():
     win = MainWindow()
     win.show()
     win.wave.state.enabled = False
+    win.combo_rx_format.setCurrentText('ASCII')
 
     # 全时间戳：条目与日志头行都带日期（Ctrl+F 时间定位的数据基础）
     win.ingest_bytes(b'boot v1.0\n')
@@ -123,6 +129,117 @@ def test_terminal_chrome():
 
     win.close()
     print('TERMINAL CHROME OK')
+
+
+def test_ports_watch():
+    """A3/A4：端口展示文本 / CH340 优选 / 热插拔自动连接 / 设置记忆。"""
+    from PySide6 import QtCore, QtWidgets
+
+    import ui.main_window as mw
+    from core.ports import (is_ch340_description, pick_auto_connect_port,
+                            port_display_text, port_name_from_display)
+    from core.settings import read_setting, write_setting
+
+    # 展示文本与取口名（描述自带 (COMx) 尾巴时去重）
+    assert port_display_text('COM6', 'USB-SERIAL CH340 (COM6)') == 'COM6 — USB-SERIAL CH340'
+    assert port_display_text('COM6', 'COM6') == 'COM6'
+    assert port_name_from_display('COM6 — USB-SERIAL CH340') == 'COM6'
+    assert port_name_from_display('COM33') == 'COM33'
+
+    # CH340 优选（多新端口选 CH340，无 CH340 取第一项）
+    assert pick_auto_connect_port([('COM6', '蓝牙串行'), ('COM8', 'USB-SERIAL CH340')]) == 'COM8'
+    assert pick_auto_connect_port([('COM3', ''), ('COM4', 'USB 设备')]) == 'COM3'
+    assert pick_auto_connect_port([]) == ''
+    assert is_ch340_description('USB-SERIAL CH341A (COM5)')
+    assert not is_ch340_description('蓝牙链接上的标准串行 (COM6)')
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = mw.MainWindow()
+    win.show()
+    win.wave.state.enabled = False
+
+    created = []
+
+    class FakeWorker(QtCore.QObject):
+        got_bytes = QtCore.Signal(bytes)
+        opened = QtCore.Signal()
+        open_failed = QtCore.Signal(str)
+        lost = QtCore.Signal(str)
+
+        def __init__(self, device, baud, parent=None):
+            super().__init__(parent)
+            self.device, self.baud = device, baud
+            created.append(self)
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def write_bytes(self, data):
+            return True
+
+    old_worker_cls, old_scan = mw.SerialWorker, mw.scan_port_infos
+    try:
+        mw.SerialWorker = FakeWorker
+        mw.scan_port_infos = lambda: [('COM3', '蓝牙链接上的标准串行 (COM3)'),
+                                      ('COM8', 'USB-SERIAL CH340 (COM8)')]
+        win.refresh_ports()
+        assert win.combo_port.count() == 2
+
+        # 勾选自动连接 + COM8 是基线外新设备 → 自动连接并优选 CH340
+        win.chk_auto_link.setChecked(True)
+        win._known_port_names = ['COM3']
+        win._port_watch_tick()
+        assert len(created) == 1 and created[0].device == 'COM8', '新设备应自动连接且优选 CH340'
+        assert '检测到新串口设备 COM8' in win.log.toPlainText()
+        assert win._connected_device == 'COM8'
+        assert read_setting('connect/port', '') == 'COM8'
+
+        # 已连着同一口：设备列表再变也不重复连
+        n_created = len(created)
+        win._known_port_names = ['COM3']
+        win._port_watch_tick()
+        assert len(created) == n_created
+
+        # 未勾选自动连接：新设备只刷新列表不连
+        win.chk_auto_link.setChecked(False)
+        win._teardown_worker()
+        win._known_port_names = ['COM3']
+        mw.scan_port_infos = lambda: [('COM3', ''), ('COM8', 'USB-SERIAL CH340 (COM8)'),
+                                      ('COM9', 'USB-SERIAL CH340 (COM9)')]
+        win._port_watch_tick()
+        assert len(created) == n_created
+        assert win.combo_port.count() == 3, '端口列表应刷新出 COM9'
+    finally:
+        mw.SerialWorker, mw.scan_port_infos = old_worker_cls, old_scan
+        win._port_watch_timer.stop()
+    win.close()
+
+    # 连接周期记忆：先写设置再重建窗口（必须在 win.close() 之后写——
+    # closeEvent 会把当时的组合框状态存回 ini）
+    write_setting('connect/rx_format', 'HEX')
+    write_setting('connect/tx_format', 'HEX')
+    write_setting('connect/newline', 'CRLF')
+    write_setting('connect/baud', '115200')
+
+    win2 = mw.MainWindow()
+    try:
+        assert win2.combo_rx_format.currentText() == 'HEX'
+        assert win2.combo_tx_format.currentText() == 'HEX'
+        assert win2.combo_newline.currentText() == 'CRLF'
+        assert win2.combo_baud.currentText() == '115200'
+    finally:
+        # 组合框先复位再关窗：closeEvent 会把当前状态存回 ini，顺手还原默认
+        win2.combo_rx_format.setCurrentText('ASCII')
+        win2.combo_tx_format.setCurrentText('ASCII')
+        win2.combo_newline.setCurrentText('LF')
+        win2.combo_baud.setCurrentText('1500000')
+        win2.chk_auto_link.setChecked(False)
+        win2._port_watch_timer.stop()
+        win2.close()
+    print('PORT WATCH OK')
 
 
 def test_wave_protocols():
@@ -710,6 +827,7 @@ def run_selftest() -> int:
     test_hexutil()
     test_main_window()
     test_terminal_chrome()
+    test_ports_watch()
     test_wave_protocols()
     test_wave_window()
     test_main_window_m3()

@@ -15,13 +15,10 @@ import time
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-try:
-    from serial.tools import list_ports
-except ImportError:
-    list_ports = None
-
 from core import APP_NAME, APP_VERSION, REPO_URL
 from core.hexutil import bytes_to_hex_text, try_parse_hex_text
+from core.ports import (port_display_text, port_name_from_display,
+                        pick_auto_connect_port, scan_port_infos)
 from core.rx_buffer import RxBuffer
 from core.serial_worker import SerialWorker
 from core.settings import read_setting, write_setting
@@ -86,6 +83,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.message_entries: list[dict] = []  # {ts, direction, text}：导出/自动日志/控制通道共用
         self.rx_bytes_total = 0
         self.tx_bytes_total = 0
+        self._known_port_names: list[str] | None = None  # 热插拔基线（None=还没首扫）
+        self._connected_device = ''
 
         # ---- 顶部连接行 ----
         self.combo_port = QtWidgets.QComboBox()
@@ -96,6 +95,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_connect.clicked.connect(self.toggle_connect)
         self.btn_refresh = QtWidgets.QPushButton('刷新串口')
         self.btn_refresh.clicked.connect(self.refresh_ports)
+        self.chk_auto_link = QtWidgets.QCheckBox('新设备自动连接')
+        self.chk_auto_link.setToolTip('勾选后扫描到新插入的串口设备即自动连接（多个新设备优先 CH340/CH341）')
+        self.chk_auto_link.toggled.connect(
+            lambda on: write_setting('connect/auto_link', '1' if on else '0'))
         self.lbl_status = QtWidgets.QLabel('未连接')
         self.lbl_status.setObjectName('status_err')
         self.lbl_stats = QtWidgets.QLabel('RX 0.0 KiB | TX 0.0 KiB')
@@ -107,6 +110,7 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(self.btn_refresh)
         top.addWidget(QtWidgets.QLabel('波特率'))
         top.addWidget(self.combo_baud, 1)
+        top.addWidget(self.chk_auto_link)
         top.addWidget(self.btn_connect)
         top.addWidget(self.lbl_status, 2)
         top.addWidget(self.lbl_stats, 1)
@@ -203,6 +207,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_timer.setInterval(FILE_INTERVAL_MS)
 
         self.refresh_ports()
+        self._wire_settings_memory()
+        self._restore_connect_settings()
+        self.start_port_watch()
 
         # ---- 帮助菜单：检查更新 / 关于 ----
         menu_help = self.menuBar().addMenu('帮助')
@@ -216,6 +223,47 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 启动更新检查：24h 节流（对齐主线），延迟 3s 等界面稳定
         QtCore.QTimer.singleShot(3000, self._maybe_auto_update_check)
+
+    # ---------- 设置记忆（gui_settings_qt.ini：口/波特率/收发格式/换行/自动连接） ----------
+
+    def _wire_settings_memory(self):
+        self.combo_baud.currentTextChanged.connect(
+            lambda text: write_setting('connect/baud', text))
+        self.combo_rx_format.currentTextChanged.connect(
+            lambda text: write_setting('connect/rx_format', text))
+        self.combo_tx_format.currentTextChanged.connect(
+            lambda text: write_setting('connect/tx_format', text))
+        self.combo_newline.currentTextChanged.connect(
+            lambda text: write_setting('connect/newline', text))
+
+    def _restore_connect_settings(self):
+        for key, combo in (('connect/rx_format', self.combo_rx_format),
+                           ('connect/tx_format', self.combo_tx_format),
+                           ('connect/newline', self.combo_newline)):
+            saved = read_setting(key, '')
+            if saved and combo.findText(saved) >= 0:
+                combo.setCurrentText(saved)
+        baud = read_setting('connect/baud', '')
+        if baud.isdigit():
+            self.combo_baud.setCurrentText(baud)
+        if read_setting('connect/auto_link', '0') in ('1', 'true', 'yes'):
+            self.chk_auto_link.setChecked(True)
+        # 端口在设备列表刷新后才可能存在，最后恢复
+        saved_port = read_setting('connect/port', '')
+        if saved_port:
+            idx = self.combo_port.findText(saved_port, QtCore.Qt.MatchStartsWith)
+            if idx >= 0:
+                self.combo_port.setCurrentIndex(idx)
+
+    def _save_connect_settings(self):
+        write_setting('connect/baud', self.combo_baud.currentText())
+        write_setting('connect/rx_format', self.combo_rx_format.currentText())
+        write_setting('connect/tx_format', self.combo_tx_format.currentText())
+        write_setting('connect/newline', self.combo_newline.currentText())
+        write_setting('connect/auto_link', '1' if self.chk_auto_link.isChecked() else '0')
+        port = port_name_from_display(self.combo_port.currentText())
+        if port:
+            write_setting('connect/port', port)
 
     # ---------- 检测更新 ----------
 
@@ -259,19 +307,75 @@ class MainWindow(QtWidgets.QMainWindow):
             f'发布页: <a href="{RELEASES_PAGE}">{RELEASES_PAGE}</a><br>'
             f'许可证: GPL-3.0')
 
-    # ---------- 串口 ----------
+    # ---------- 串口 / 热插拔 / 设置记忆 ----------
+
+    PORT_WATCH_INTERVAL_MS = 2000  # 主线同款 2s 轮询
 
     def refresh_ports(self):
+        infos = scan_port_infos()
+        keep = port_name_from_display(self.combo_port.currentText())
         self.combo_port.clear()
-        for p in (list_ports.comports() if list_ports else []):
-            self.combo_port.addItem(f'{p.device} — {p.description}')
+        for device, desc in infos:
+            self.combo_port.addItem(port_display_text(device, desc))
+        if keep:
+            idx = self.combo_port.findText(keep, QtCore.Qt.MatchStartsWith)
+            if idx >= 0:
+                self.combo_port.setCurrentIndex(idx)
+
+    def start_port_watch(self):
+        """首扫建基线（已插着的设备不触发自动连接）→ 启动 2s 热插拔轮询。"""
+        self._known_port_names = [d for d, _ in scan_port_infos()]
+        self._port_watch_timer = QtCore.QTimer(self)
+        self._port_watch_timer.setInterval(self.PORT_WATCH_INTERVAL_MS)
+        self._port_watch_timer.timeout.connect(self._port_watch_tick)
+        self._port_watch_timer.start()
+
+    def _port_watch_tick(self):
+        infos = scan_port_infos()
+        names = [d for d, _ in infos]
+        if names == self._known_port_names:
+            return
+        new_devices = ([(d, desc) for d, desc in infos if d not in self._known_port_names]
+                       if self._known_port_names is not None else [])
+        self._known_port_names = names
+        self.refresh_ports()
+        self._maybe_auto_connect(new_devices)
+
+    def _maybe_auto_connect(self, new_devices: list[tuple[str, str]]):
+        if not new_devices or not self.chk_auto_link.isChecked():
+            return
+        target = pick_auto_connect_port(new_devices)
+        if not target:
+            return
+        desc = next((d for d, desc in new_devices if d == target), '')
+        self._append_log('SYS', f'检测到新串口设备 {port_display_text(target, desc)}，尝试自动连接…')
+        idx = self.combo_port.findText(target, QtCore.Qt.MatchStartsWith)
+        if idx >= 0:
+            self.combo_port.setCurrentIndex(idx)
+        if self.worker and port_name_from_display(self.combo_port.currentText()) == \
+                self._connected_device:
+            return  # 已经连着同一个口
+        try:
+            self.open_connection()
+        except Exception as exc:
+            self._append_log('SYS', f'自动连接失败: {exc}')
 
     def toggle_connect(self):
         if self.worker:
             self._teardown_worker()
             self.set_status('未连接', 'status_err')
             return
-        device = self.combo_port.currentText().split(' — ')[0].strip()
+        if not self.combo_port.currentText():
+            self.set_status('没有可用串口', 'status_err')
+            return
+        try:
+            self.open_connection()
+        except (ValueError, OSError) as exc:
+            self.set_status(f'打开失败: {exc}', 'status_err')
+
+    def open_connection(self):
+        """按当前选口/波特率打开串口（手动连接与热插拔自动连接共用）。"""
+        device = port_name_from_display(self.combo_port.currentText())
         if not device:
             self.set_status('没有可用串口', 'status_err')
             return
@@ -280,7 +384,10 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError:
             self.set_status('波特率必须是数字', 'status_err')
             return
+        if self.worker:  # 换口重连：先拆旧连接
+            self._teardown_worker()
         self.worker = SerialWorker(device, baud, self)
+        self._connected_device = device
         self.worker.got_bytes.connect(self.ingest_bytes)
         self.worker.open_failed.connect(lambda msg: (self._teardown_worker(),
                                                      self.set_status(f'打开失败: {msg}', 'status_err')))
@@ -290,6 +397,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.opened.connect(lambda: self.set_status(f'已连接 {device} @ {baud}', 'status_ok'))
         self.worker.opened.connect(self._on_connected)
         self.worker.start()
+        write_setting('connect/port', device)
+        write_setting('connect/baud', str(baud))
 
     def _on_connected(self):
         # 连接周期归零收发统计（对齐主线 reset_receive_stats 时机）
@@ -311,6 +420,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_status.style().polish(self.lbl_status)
 
     def closeEvent(self, event):  # noqa: N802 (Qt 命名)
+        self._save_connect_settings()
+        if getattr(self, '_port_watch_timer', None):
+            self._port_watch_timer.stop()
         self.wave.stop_timers()
         self.spectrum.stop_timers()
         self._stop_file_send('窗口关闭')
