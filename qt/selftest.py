@@ -40,6 +40,21 @@ def test_rx_buffer():
     assert buf3.feed(b'12.', t) == []
     assert buf3.feed(b'5\n', t) == ['12.5']
 
+    # 跨块中文：多字节字符被 USB 分包从中间切开不能变乱码（主线 GetDecoder 语义）
+    raw = '透传回环测试\n'.encode('utf-8')
+    buf4 = RxBuffer()
+    for i in range(len(raw)):  # 逐字节喂入 = 最狠的切法
+        lines = buf4.feed(raw[i:i + 1], t)
+    assert lines == ['透传回环测试'], '逐字节跨块解码必须还原完整中文'
+
+    # 半个字符悬着时空闲落显：吐完整字符前缀，悬着的半个字留在解码器里
+    buf5 = RxBuffer()
+    half = '瀑'.encode('utf-8')[:2]
+    assert buf5.feed(b'x' + half, t) == []
+    assert buf5.poll_idle_flush(t + 0.5) == 'x'
+    # 后半块到齐 → 悬着的'瀑'补全成行
+    assert buf5.feed(b'\x91y\n', t) == ['瀑y']
+
     print('RXBUFFER OK')
 
 
