@@ -556,6 +556,97 @@ def test_update_ui():
     print('UPDATE UI OK')
 
 
+def test_spectrum_dsp():
+    import math
+
+    import numpy as np
+
+    from core.dsp import (color_map, magnitude_spectrum, max_bin, to_db,
+                          update_ema, update_max_hold, waterfall_row)
+
+    # 1000 点、fs=1000：50 Hz 正弦（25 个周期）峰在 bin 50
+    n = 1000
+    sig = [3.0 * math.sin(2 * math.pi * 50.0 * i / 1000.0) for i in range(n)]
+    mag, used = magnitude_spectrum(sig)
+    assert used == 512 and mag.size == 256
+    peak = max_bin(to_db(mag), 1)
+    assert abs(peak * 1000.0 / used - 50.0) < 1000.0 / used, f'peak bin {peak}'
+    # 满量程正弦（频率对齐 bin）→ 汉宁窗相干增益 0.5 → -6.02 dB（主线 C# 同样不补偿）
+    sig2 = [math.sin(2 * math.pi * 32 * i / 512.0) for i in range(512)]
+    mag2, _ = magnitude_spectrum(sig2)
+    db2 = to_db(mag2)
+    assert abs(db2[32] + 6.02) < 0.5, f'bin 幅度应≈-6dB，实际 {db2[32]}'
+    # 底噪下限 -140
+    assert to_db(np.array([0.0]))[0] == -140.0
+    # 短输入返回空
+    short_mag, short_used = magnitude_spectrum([1.0] * 10)
+    assert short_used == 0 and short_mag.size == 0
+
+    # 峰值保持 / EMA
+    hold = np.full(4, -140.0)
+    update_max_hold(np.array([-120.0, -130.0, -110.0, -100.0]), hold)
+    assert list(hold) == [-120.0, -130.0, -110.0, -100.0]
+    update_max_hold(np.array([-125.0, -125.0, -125.0, -125.0]), hold)
+    assert list(hold) == [-120.0, -125.0, -110.0, -100.0], '保持只升不降'
+    avg = np.array([0.0, 0.0])
+    update_ema(np.array([10.0, -10.0]), avg, 0.25)
+    assert list(avg) == [2.5, -2.5]
+
+    # 瀑布配色端点：t=0 → 暗蓝(0,0,60)，t=1 → 白(255,255,255)
+    row = waterfall_row(np.array([-100.0, 0.0]), -100.0, 0.0, 1.0)
+    assert row.shape == (2, 3) and tuple(row[0]) == (0, 0, 60) and tuple(row[1]) == (255, 255, 255)
+    assert color_map(0.4)[1] > color_map(0.1)[1], '中段应比暗端绿'
+    print('SPECTRUM DSP OK')
+
+
+def test_spectrum_panel():
+    import math
+
+    from PySide6 import QtWidgets
+
+    from ui.main_window import MainWindow
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
+    panel = win.spectrum
+
+    # 喂 FireWater 单通道 50Hz 正弦（fs=1000 → 帧率 1000/秒，模拟数据 20ms/帧太慢，直接喂数据）
+    phase = 0.0
+    for _ in range(600):
+        phase += 2 * math.pi * 50.0 / 1000.0
+        win.wave.state.consume_bytes(f'{math.sin(phase):.6f}\n'.encode())
+    panel.combo_ch.setCurrentIndex(0)
+    panel.combo_pts.setCurrentText('512')
+    panel.edit_fs.setText('1000')
+
+    result = panel.analyze()
+    assert result is not None and result['used'] == 512
+    assert abs(result['df'] - 1000.0 / 512) < 1e-9
+    assert abs(result['rbw'] - 1.5 * 1000.0 / 512) < 1e-9
+
+    # 峰值保持积累：重绘两帧后 max_hold 不低于当前谱
+    panel.chk_peak.setChecked(True)
+    panel.repaint_spectrum()
+    panel.repaint_spectrum()
+    assert panel._max_hold is not None and panel._max_hold.size == 256
+    # 主频标注
+    assert '主频:' in panel.lbl_peak.text() and '--' not in panel.lbl_peak.text()
+    # 瀑布在积累且行数受限
+    assert 1 <= len(panel._waterfall) <= 120
+
+    # 冻结：底层继续进数据，面板不更新
+    panel.btn_freeze.setChecked(True)
+    rows_at_freeze = len(panel._waterfall)
+    win.wave.state.consume_bytes(b'0.5\n')
+    panel.repaint_spectrum()
+    assert len(panel._waterfall) == rows_at_freeze, '冻结时瀑布不进新行'
+    panel.btn_freeze.setChecked(False)
+
+    win.close()
+    print('SPECTRUM PANEL OK')
+
+
 def run_selftest() -> int:
     import os
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -569,6 +660,8 @@ def run_selftest() -> int:
     test_modbus_panel()
     test_update_check()
     test_update_ui()
+    test_spectrum_dsp()
+    test_spectrum_panel()
     print('QT_SPIKE_SELFTEST_OK')
     return 0
 

@@ -28,6 +28,7 @@ from core.update_check import RELEASES_PAGE, check_app_update
 from ui.find_bar import FindBar
 from ui.history_edit import HistoryLineEdit
 from ui.modbus_panel import ModbusPanel
+from ui.spectrum_panel import SpectrumPanel
 from ui.theme import RX_COLOR, SYS_COLOR, TIME_COLOR, TX_COLOR
 from ui.wave_window import WaveWindow
 
@@ -155,14 +156,16 @@ class MainWindow(QtWidgets.QMainWindow):
         terminal_layout.addWidget(self.log, 1)
         terminal_layout.addLayout(bottom)
 
-        # ---- 页签：终端 / 波形 / Modbus ----
+        # ---- 页签：终端 / 波形 / 频谱 / Modbus ----
         self.wave = WaveWindow()
+        self.spectrum = SpectrumPanel(self.wave.state)
         self.modbus = ModbusPanel()
         self.modbus.transport = self.modbus_transport
         self.modbus.log_fn = self._append_log
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(terminal, '终端')
         self.tabs.addTab(self.wave, '波形')
+        self.tabs.addTab(self.spectrum, '频谱')
         self.tabs.addTab(self.modbus, 'Modbus')
         self.tabs.setObjectName('main_tabs')
         self.setCentralWidget(self.tabs)
@@ -281,6 +284,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802 (Qt 命名)
         self.wave.stop_timers()
+        self.spectrum.stop_timers()
         self._stop_file_send('窗口关闭')
         self._teardown_worker()
         super().closeEvent(event)
