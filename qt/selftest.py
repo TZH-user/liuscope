@@ -860,6 +860,128 @@ def test_control_channel():
     print('CONTROL CHANNEL OK')
 
 
+def test_headless():
+    """C15：无头捕获——回放管线/触发器/错误命中/期望测试/退出码（不需要真实串口）。"""
+    import base64
+    import json
+    import os
+    import tempfile
+
+    from core.headless import (EXIT_ERROR_HITS, EXIT_OK, EXIT_TEST_FAIL,
+                               HeadlessOptions, TriggerEngine, invoke_expect_steps,
+                               run_headless)
+
+    tmp = tempfile.mkdtemp(prefix='qt_headless_')
+    log_dir = os.path.join(tmp, 'logs')
+
+    # 触发器引擎：before/after 上下文 + once
+    trigger_cfg = os.path.join(tmp, 'triggers.json')
+    with open(trigger_cfg, 'w', encoding='utf-8') as f:
+        json.dump([{'name': 'panic', 'pattern': 'panic', 'before_lines': 2,
+                    'after_lines': 1, 'once': True}], f)
+
+    def data_line(b: bytes, ms: int) -> str:
+        return json.dumps({'dir': 'DATA', 'b64': base64.b64encode(b).decode(),
+                           'n': len(b), 'ms': ms}) + '\n'
+
+    replay_path = os.path.join(tmp, 'replay.jsonl')
+    with open(replay_path, 'w', encoding='utf-8') as f:
+        f.write(data_line(b'line-1\nline-2\n', 10))
+        f.write(data_line(b'kernel panic!\n', 20))
+        f.write(data_line(b'after-panic\n', 30))
+        f.write(data_line(b'CFSR: 0x00020000\n', 40))
+
+    opts = HeadlessOptions(replay_path=replay_path, protocol='FireWater',
+                           trigger_file=trigger_cfg, log_dir=log_dir)
+    exit_code, summary = run_headless(opts, print_fn=lambda *_: None)
+    assert exit_code == EXIT_OK, '回放文件没有 error_regex → 0'
+    assert summary['lines'] == 5 and summary['frames'] == 0, '文本行不是数值帧'
+    with open(opts.out, encoding='utf-8') as f:
+        events = [json.loads(line) for line in f if line.strip()]
+    assert events[0]['dir'] == 'META' and events[-1]['dir'] == 'SUMMARY'
+    dirs = [e['dir'] for e in events]
+    assert dirs.count('RX') == 5 and 'EVT' in dirs, 'panic 行应触发 EVT'
+    assert 'panic' in next(e for e in events if e['dir'] == 'EVT')['text']
+    assert os.path.isdir(os.path.join(log_dir, 'events')), '触发上下文落盘'
+    evt_file = next(e for e in events if e['dir'] == 'EVT')['file']
+    with open(evt_file, encoding='utf-8') as f:
+        ctx = f.read()
+    assert 'line-2' in ctx and 'kernel panic!' in ctx and 'after-panic' in ctx,         'before/after 上下文（before 窗口含命中行自身，与主线一致）'
+    # HardFault 自动解码事件
+    fault = next(e for e in events if e['dir'] == 'FAULT')
+    assert 'UFSR.INVSTATE' in fault['decoded']
+
+    # 错误模式命中 → 退出码 2
+    opts2 = HeadlessOptions(replay_path=replay_path, protocol='FireWater',
+                            error_regex='panic', log_dir=log_dir)
+    exit_code, summary = run_headless(opts2, print_fn=lambda *_: None)
+    assert exit_code == EXIT_ERROR_HITS and summary['error_hits'] == 2,         "panic 命中 kernel panic! 与 after-panic 两行" 
+
+    # JustFloat 回放：帧行带 ch
+    frame = __import__('struct').pack('<2f', 1.5, -2.25) + b'\x00\x00\x80\x7f'
+    replay_jf = os.path.join(tmp, 'replay_jf.jsonl')
+    with open(replay_jf, 'w', encoding='utf-8') as f:
+        f.write(data_line(frame * 3, 5))
+    opts3 = HeadlessOptions(replay_path=replay_jf, protocol='JustFloat', log_dir=log_dir)
+    exit_code, summary = run_headless(opts3, print_fn=lambda *_: None)
+    assert exit_code == EXIT_OK and summary['frames'] == 3
+    with open(opts3.out, encoding='utf-8') as f:
+        events = [json.loads(line) for line in f if line.strip()]
+    rows = [e for e in events if e['dir'] == 'RX']
+    assert len(rows) == 3 and rows[0]['ch'] == [1.5, -2.25]
+
+    # 期望测试：假串口 + 脚本化应答
+    class FakeSerial:
+        def __init__(self):
+            self.rx = b''
+
+        def write(self, data):
+            self.rx += bytes(data)
+            return len(data)
+
+        def in_waiting(self):
+            return 0
+
+    fake = FakeSerial()
+    send_calls = []
+
+    def send_fn(text, as_hex, newline_mode):
+        send_calls.append((text, as_hex, newline_mode))
+
+    steps = [{'name': 'at', 'send': 'AT', 'expect': 'OK', 'timeout_ms': 5},
+             {'name': 'only-read', 'timeout_ms': 5}]
+    script = ['AT -> OK\r\n']  # 第一次读返回命中文本，第二次空
+
+    def read_fn(timeout_ms):
+        return script.pop(0) if script else ''
+
+    result = invoke_expect_steps(steps, send_fn, read_fn)
+    assert result['all_pass'] and result['total'] == 2
+    assert send_calls == [('AT', False, 'CRLF')]
+    # 失败路径
+    script = ['no match here']
+    result = invoke_expect_steps(steps[:1], send_fn, read_fn)
+    assert not result['all_pass'] and result['fail'] == 1
+
+    # 参数校验
+    try:
+        run_headless(HeadlessOptions(replay_path=replay_path, port='COM8'))
+        assert False, 'replay+port 应报错'
+    except ValueError:
+        pass
+    try:
+        run_headless(HeadlessOptions(protocol='Bad'))
+        assert False, '协议校验'
+    except ValueError:
+        pass
+    # 期望测试失败路径（串口注入假对象）
+    opts4 = HeadlessOptions(replay_path=replay_path, protocol='FireWater',
+                            log_dir=log_dir)
+    exit_code, summary = run_headless(opts4, print_fn=lambda *_: None)
+    assert exit_code == EXIT_OK and summary['test_total'] == 0
+    print('HEADLESS OK')
+
+
 def test_wave_protocols():
     """三协议解码 + 视图模型 + 滤波 + 快照合同（对齐主线 SelfTest 断言口径）。"""
     import struct
@@ -1454,6 +1576,7 @@ def run_selftest() -> int:
     test_xy_view()
     test_session_record()
     test_control_channel()
+    test_headless()
     test_wave_protocols()
     test_wave_window()
     test_main_window_m3()
