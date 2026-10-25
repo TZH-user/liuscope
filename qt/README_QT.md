@@ -6,17 +6,18 @@ master（PowerShell / WinForms）继续独立维护，两边版本号平行：
 | 线 | 版本口径 | 说明 |
 |---|---|---|
 | master（主线） | `app_version` 1.1.0（开发中）→ 下个 Release v1.1.0 | 现有全部功能，真机回归后发布 |
-| qt-frontend-spike（支线） | 0.4.0-qt，0.x = 实验期 | Qt 新前端，主线功能已全部复刻，待真机回归 |
+| qt-frontend-spike（支线） | 0.5.0-qt，0.x = 实验期 | Qt 新前端，主线功能已全量复刻，待真机回归 |
 
 ## 运行与自测
 
 ```powershell
 python -m pip install PySide6-Essentials pyserial pyqtgraph   # 一次性环境准备（已装可跳过）
 python qt/main.py                # 运行（想不占控制台可用 pythonw qt\main.py）
-python qt/main.py --selftest     # 离屏自测（无需显示器/串口，12 组断言）
+python qt/main.py --selftest     # 离屏自测（无需显示器/串口，23 组断言）
+python qt/headless_main.py --help   # 无头捕获 CLI（不开界面，供 AI/脚本调用）
 ```
 
-打包（实测 101 MB 单文件 exe，全套自测通过；`--windowed` = 启动不弹 cmd 黑窗）：
+打包（实测约 101 MB 单文件 exe，全套自测通过；`--windowed` = 启动不弹 cmd 黑窗）：
 
 ```powershell
 python -m PyInstaller --noconfirm --onefile --windowed --paths qt --name serialscope-qt qt/main.py
@@ -35,47 +36,70 @@ Qt 的 QSS 是纯 CSS 写法，一套声明全局生效；波形用 pyqtgraph（
 - **M2 波形（已完成，34b7f68）**：pyqtgraph 曲线 + FireWater/JustFloat/RawData 三协议
   （core/wave_state.py 逐字对齐主线 core/protocol.ps1）+ 滤波（滑动平均/零相位低通，
   core/dsp.py 对齐 C# WaveDsp）+ 视图模型（跟随/历史/平移/窗口宽度）+ 通道芯片改名持久化 +
-  CSV 导出 + 模拟数据；频谱/XY 相位/场景预设/录制尚未移植（见下方“未复刻清单”）
+  CSV 导出 + 模拟数据
 - **M3 收发增强（已完成，b989cc4）**：ASCII/HEX 双格式收发、换行模式（无/LF/CR/CRLF）、
   发送历史（⬆/⬇ 回翻）、日志查找条（高亮 + 第 i/N 处）、文件分块发送（4 KiB/20ms）
 - **M4 外围（已完成，cc14aab）**：Modbus RTU 调试台（8 功能码手动事务 + Watch 合并轮询，
   core/modbus.py 逐字对齐主线插件）、检测更新（GitHub Releases API，线程池后台 + 24h 节流）、
   PyInstaller 打包与体积实测
-- **M4.5 频谱仪（已完成，本次）**：FFT dB 谱（core/dsp.py 移植 C# WaveDsp：最长 2^k 段 +
-  汉宁窗 + 单边归一化 + 20log10 底噪 -140）+ 峰值保持/指数平均 + 手动 RBW（fs/RBW 反推 FFT
-  长度）+ 参考电平/dB每格标度 + 瀑布图（色带逐段对齐主线 ColorMap，最新在顶、行数 120 上限）
-  + Marker（悬停读数）+ 主频标注（跳过 DC）
-- **M5 合并评估**：真机（RK3562/CH340）回归 + 下方未复刻清单补齐或豁免，
-  由你拍板：合入 master（主线退役或双轨） / 继续观察 / 关闭支线
+- **M4.5 频谱仪（已完成，6a4f464/8e04c31）**：FFT dB 谱（core/dsp.py 移植 C# WaveDsp）+
+  峰值保持/指数平均 + 手动 RBW + 参考电平标度 + 瀑布图（最新在顶）+ Marker + 主频标注
+- **M5 功能补齐（已完成，44d1ff8→a053ad2，v0.5.0-qt）**：按主线盘点清单全量复刻——
+  - A 档：清空记录、RX/TX 字节统计、全时间戳日志（yyyy-MM-dd HH:mm:ss.fff）、
+    端口热插拔 2s 自动刷新、新设备自动连接（CH340 优选）、设置记忆
+    （口/波特率/收发格式/换行，gui_settings_qt.ini）、Ctrl+F 时间模式查找（输入时刻直跳头行）
+  - B 档：自动日志落盘（logs/serial_auto_log_*.txt，懒创建、SYS 不落）、日志导出、
+    行悬停 0.4s HEX⇄文本/十进制/float32 互转提示、STM32 HardFault 寄存器 dump 自动解码
+    （CFSR/HFSR 逐位口径）、波形页「格式说明」+ AI 接入说明一键复制
+  - C 档：XY 相位图（1/2/4 正方格 + 余晖衰减 + 固定/自适应量程）、波形场景预设
+    （wave_presets.txt INI 往返 + 一键应用）、会话录制（JSONL DATA b64）与 GUI 回放、
+    AI 控制通道（TCP 127.0.0.1:9101 JSON 行协议，命令族对齐主线）、
+    无头捕获模式（qt/headless_main.py：捕获/回放/触发器/期望测试/复位烧录，退出码 0/2/3/4/5 对齐主线）
+- **M6 合并评估**：真机（RK3562/CH340）回归，由你拍板：合入 master（主线退役或双轨） /
+  继续观察 / 关闭支线
 
-## 未复刻清单（M5 前补齐或明确豁免）
+## 与主线的已知差异（有意为之或待真机回归）
 
-- XY 相位图（IQ 李萨如/星座图，余晖累积）
-- 波形场景预设（wave_presets.txt）与会话录制（JSONL 回放）
-- 自动日志落盘 / 日志导出 / 控制通道（headless 指令面）
-- 行悬停格式互转（HEX↔文本↔float32 tooltip）
-- 主线 Demo 模式（-Demo 演示截图链路，属开发工具，可豁免）
+- AI 控制通道不含 expect/set_hit_pattern/reset/flash 四个命令（期望测试与烧录走 headless CLI，
+  语义等价、宿主面更干净）
+- 日志为单区合并视图（主线是 RX/TX 双框），悬停互转/查找对合并视图生效
+- 查找时间模式弱高亮上限 500 处（两万条日志全量高亮会卡）
+- 浅色主题与 Demo 模式（-Demo 演示截图链路）明确豁免
 
 ## 目录
 
 ```
 qt/
   main.py               入口（--selftest 转自测）
+  headless_main.py      无头捕获 CLI（采集/回放/触发/期望测试/复位烧录）
   core/rx_buffer.py     行缓冲/空闲落显/积压（纯逻辑，假时钟可测）
   core/serial_worker.py QThread 串口读写（端口在工作线程打开）
   core/hexutil.py       HEX 文本互转（0x 前缀/多分隔符，非法 token 报错）
+  core/ports.py         串口扫描/展示文本/CH340 识别与优选
   core/wave_state.py    三协议解码 + 视图模型 + 滤波缓存（纯逻辑，可测）
-  core/dsp.py           滑动平均/零相位低通/FFT 幅度谱/瀑布色带（numpy，对齐主线 C# WaveDsp）
+  core/dsp.py           滤波/FFT 幅度谱/瀑布色带（numpy，对齐主线 C# WaveDsp）
   core/modbus.py        CRC16/组帧/响应解析/Watch 合并轮询（纯逻辑，可测）
   core/update_check.py  版本比较 + GitHub Releases 检查（opener 可注入）
   core/settings.py      gui_settings_qt.ini 读写（QSettings IniFormat）
-  core/__init__.py      APP_VERSION = '0.3.0-qt'
-  ui/main_window.py     主窗体（终端/波形/Modbus 三页签 + 帮助菜单）
-  ui/wave_window.py     pyqtgraph 波形页
+  core/auto_log.py      自动日志落盘（懒创建）+ 导出文本构建
+  core/log_find.py      时间戳查询识别/解析/头行定位
+  core/text_format.py   行悬停 HEX⇄文本/十进制/float32 互转
+  core/fault_decode.py  STM32 HardFault dump 逐位解码
+  core/ai_doc.py        AI 接入说明三协议文案
+  core/wave_presets.py  波形场景预设 INI 往返
+  core/session_record.py 会话录制 JSONL 与回放读取
+  core/control_channel.py AI 控制通道（TCP JSON 行协议，api 注入式）
+  core/headless.py      无头捕获编排（回放可测，串口工厂注入）
+  ui/main_window.py     主窗体（终端/波形/频谱/Modbus 四页签 + 帮助菜单 + 热插拔 + 设置记忆）
+  ui/wave_window.py     pyqtgraph 波形页（+ 预设/录制/格式说明/XY 开关）
+  ui/xy_view.py         XY 相位图（余晖累积 + 正方格 IQ 视图）
   ui/spectrum_panel.py  频谱仪页（FFT dB 谱 + 瀑布 + Marker）
   ui/modbus_panel.py    Modbus 调试台页（transport 注入式收发）
-  ui/find_bar.py        查找条
+  ui/find_bar.py        查找条（文本 + 时间定位双模式）
+  ui/log_hover.py       日志行悬停互转提示
   ui/history_edit.py    发送历史输入框
   ui/theme.py           深色 QSS + 日志行配色
-  selftest.py           离屏自测（12 组：RxBuffer/HEX/主窗体/协议/波形页/M3/Modbus×2/更新×2/频谱×2）
+  selftest.py           离屏自测（23 组：RX 缓冲/HEX/主窗体/终端外观/热插拔/时间查找/自动日志/
+                        悬停互转/HardFault+AI 文档/预设/XY/录制/控制通道/headless/协议/波形页/
+                        M3/Modbus×2/更新×2/频谱×2）
 ```
