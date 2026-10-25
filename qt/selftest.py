@@ -242,6 +242,64 @@ def test_ports_watch():
     print('PORT WATCH OK')
 
 
+def test_find_time_mode():
+    """A5：时间戳查询识别/解析 + 头行定位（对齐主线 find_log_timestamp_jump）。"""
+    from datetime import datetime
+
+    from PySide6 import QtWidgets
+
+    from core.log_find import (collect_timestamp_headers, find_timestamp_jump,
+                               is_timestamp_query, parse_timestamp)
+    from ui.find_bar import FindBar
+
+    # 查询形态识别
+    assert is_timestamp_query('20:57')
+    assert is_timestamp_query('10:03:22.5')
+    assert is_timestamp_query('2026-10-24 20:57:38.500')
+    assert is_timestamp_query('2026-10-24')
+    assert not is_timestamp_query('hello')
+    assert not is_timestamp_query('')
+    # 非法时间解析失败 → 回退文本搜索
+    assert parse_timestamp('25:99') is None
+    assert parse_timestamp('10:03') == datetime(1900, 1, 1, 10, 3)
+
+    # 头行收集与定位：3 条头行 10:00 / 10:05 / 10:10
+    text = ('[2026-10-24 10:00:00.000] RX\nboot ok\n'
+            '[2026-10-24 10:05:00.000] RX\ntemp=1\n'
+            '[2026-10-24 10:10:00.000] SYS\ndone\n')
+    hits = collect_timestamp_headers(text)
+    assert len(hits) == 3 and hits[0][0] == 0
+
+    # 只给时刻：日期取首条头行的日期；向前 = 首条 ≥ 时刻
+    r = find_timestamp_jump(hits, '10:03', backward=False)
+    assert r['found'] and r['ordinal'] == 2 and r['time'].strftime('%H:%M') == '10:05'
+    assert text[r['pos']:r['pos'] + r['length']] == '[2026-10-24 10:05:00.000]'
+    # 精确命中取自身
+    r = find_timestamp_jump(hits, '10:10:00', backward=False)
+    assert r['ordinal'] == 3
+    # 时刻早于所有条目 → 回绕到第一条
+    r = find_timestamp_jump(hits, '09:00', backward=False)
+    assert r['ordinal'] == 1
+    # 向后 = 末条 < 时刻
+    r = find_timestamp_jump(hits, '10:10', backward=True, sel_start=10 ** 9)
+    assert r['ordinal'] == 2, '选区在末尾时向后应取 10:05 这条'
+    # 无 ≥ 该时刻条目
+    r = find_timestamp_jump(hits, '23:00', backward=False, sel_start=10 ** 9, sel_end=10 ** 9)
+    assert r is not None and not r['found'] and r['total'] == 3
+
+    # FindBar 集成：时间查询直接跳头行并显示「时刻 第 i/N 处」
+    edit = QtWidgets.QTextEdit()
+    edit.setPlainText(text)
+    bar = FindBar(edit)
+    bar.edit_find.setText('10:03')
+    assert '时刻 第 2/3 处' in bar.lbl_count.text()
+    cursor = edit.textCursor()
+    assert '10:05' in cursor.selectedText()
+    bar.edit_find.setText('hello')
+    assert not bar._time_mode and bar.lbl_count.text() == '无匹配'
+    print('FIND TIME OK')
+
+
 def test_wave_protocols():
     """三协议解码 + 视图模型 + 滤波 + 快照合同（对齐主线 SelfTest 断言口径）。"""
     import struct
@@ -828,6 +886,7 @@ def run_selftest() -> int:
     test_main_window()
     test_terminal_chrome()
     test_ports_watch()
+    test_find_time_mode()
     test_wave_protocols()
     test_wave_window()
     test_main_window_m3()
