@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""qt 支线核心模块包。
+"""Qt 主线核心模块包。
 
-版本口径：0.x = 实验支线，与主线 (PowerShell, app_version 1.1.0) 平行演进；
-进入合并评估前不追随主线版本号。
+版本口径：自 v1.1.0 起 Qt 实现转正为主线（经压力/交互/真机浸泡测试验收），
+接续主线版本号；PowerShell 实现封版于 v1.0.0，代码保留在仓库根目录作零安装存档。
 """
-APP_VERSION = '0.5.0-qt'
+APP_VERSION = '1.1.0'
 APP_NAME = 'serialscope-qt'
 REPO_URL = 'https://github.com/TZH-user/serialscope'

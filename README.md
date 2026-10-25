@@ -1,12 +1,20 @@
-﻿# serialscope · RK3562 串口收发工具 V6
+# serialscope · RK3562 串口收发工具 V6
 
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-blue)
-![PowerShell](https://img.shields.io/badge/PowerShell-WinPS%205.1-5391FE)
-![UI](https://img.shields.io/badge/UI-WinForms%20%E5%8F%8C%E4%B8%BB%E9%A2%98-4EC9B0)
-![安装](https://img.shields.io/badge/%E4%BE%9D%E8%B5%96-%E9%9B%B6%E5%AE%89%E8%A3%85-F48771)
+![Qt](https://img.shields.io/badge/%E4%B8%BB%E7%BA%BF-Qt%20(PySide6)%20v1.1.0%2B-41CD52)
+![PowerShell](https://img.shields.io/badge/%E5%AD%98%E6%A1%A3-PowerShell%20v1.0.0-5391FE)
+![安装](https://img.shields.io/badge/Qt%E7%89%88-%E5%85%8D%E5%AE%89%E8%A3%85exe-F48771)
 ![License](https://img.shields.io/badge/License-GPL--3.0-blue)
 
-**一个单脚本、免安装的串口调试终端**：收发日志、HEX⇄文本互转、三种协议实时波形（FireWater / JustFloat / RawData）、日志查找与时间戳定位、文件发送、命令历史，并带一套插件框架——内置 **Modbus RTU 主站调试台**（事务 + 实时 Watch）与频谱仪。面向 RK3562 / STM32 等嵌入式联调，双击即用。
+**一个串口调试终端**：收发日志、HEX⇄文本互转、三种协议实时波形（FireWater / JustFloat / RawData）、频谱仪 + 瀑布图、Modbus RTU 主站调试台、日志查找与时间戳定位、文件发送、命令历史、AI 控制通道（TCP JSON 行协议，供其他 AI/脚本遥控本工具）。面向 RK3562 / STM32 等嵌入式联调。
+
+## 两个实现
+
+| | **Qt 版（主线，v1.1.0 起）** | PowerShell 版（存档，封版 v1.0.0） |
+|---|---|---|
+| 位置 | `qt/` | 仓库根目录 `.ps1` |
+| 运行 | 下载 release 里的 `serialscope-qt.exe`（约 100MB，双击即用，免装 Python）或 `python qt/main.py` | `launch_serial_terminal_v6.vbs`（Windows 自带 PowerShell 5.1，零安装） |
+| 说明 | PySide6 + pyqtgraph，功能对齐 PS 版并全量复刻（见 [qt/README_QT.md](qt/README_QT.md) 里程碑 M1~M5）；经合成洪泛压测、H743 真机浸泡、前台交互测试验收 | 功能冻结，作零安装兜底长期保留；文档与插件框架仍适用 |
 
 | 主窗口（查找高亮 + 悬停互转） | 波形窗口（FireWater 三通道） |
 |---|---|
@@ -50,17 +58,18 @@
 
 ## 🚀 快速开始
 
-1. 双击 `launch_serial_terminal_v6.vbs`（无黑框，推荐）或 `launch_serial_terminal_v6.cmd`
-2. 顶部选好串口与波特率 → **连接**；RK3562 推荐先试 `1500000 / 8 / None / One / None`
-3. 板子按协议发数据即可看到曲线；点「格式说明」查看三种协议的帧格式
-
-手动启动（需要看报错时）：
+**Qt 主线版（推荐）**：从 [Releases](https://github.com/TZH-user/serialscope/releases) 下载 `serialscope-qt.exe`（约 100MB，自带全部依赖，双击即用）→ 选串口与波特率 → **连接**。源码运行与打包：
 
 ```powershell
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File .\serial_terminal_v6.ps1
+pip install PySide6 pyserial pyqtgraph numpy
+python qt/main.py
+# 打包单文件 exe（--windowed = 不弹黑窗）
+python -m PyInstaller --noconfirm --onefile --windowed --paths qt --name serialscope-qt qt/main.py
 ```
 
-> Windows 10/11 自带的 Windows PowerShell 5.1 直接可跑，无需安装任何东西；PowerShell 7（pwsh）暂不支持，详见下方「已知限制」。
+**PowerShell 存档版（零安装兜底）**：双击 `launch_serial_terminal_v6.vbs`（Windows 10/11 自带 Windows PowerShell 5.1 直接可跑，无需安装任何东西；PowerShell 7 暂不支持）。
+
+RK3562 推荐先试 `1500000 / 8 / None / One / None`；板子按协议发数据即可看到曲线，点「格式说明」查看三种协议的帧格式。
 
 ## ⌨️ 快捷键
 
@@ -79,7 +88,10 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File .\serial_te
 ## 🧪 自检与测试
 
 ```powershell
-# 纯逻辑自检（协议解析 / CRC / 查找 / 历史 / Modbus 帧构造等 100+ 断言）
+# Qt 主线：离屏自测（24 组：协议/滑块/频谱/控制通道/悬停/更新检查…）
+python qt/selftest.py
+
+# PowerShell 存档版：纯逻辑自检（协议解析 / CRC / 查找 / 历史 / Modbus 帧构造等 100+ 断言）
 powershell -NoProfile -ExecutionPolicy Bypass -STA -File .\serial_terminal_v6.ps1 -SelfTest
 
 # 端到端（真实窗体 + 波形渲染 + 导出 + 录制 + 控制通道 + 布局断言）
@@ -93,13 +105,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\run_stability_tests.ps1 -S
 
 ```
 serialscope/
-  serial_terminal_v6.ps1   主脚本（入口：窗体构建 / 事件绑定 / SelfTest / WaveTest）
-  launch_serial_terminal_v6.vbs / .cmd   双击启动器
-  core/                    serial_io（IO·日志·设置）· protocol（波形协议）· fault_decode · headless · control_channel（AI 控制通道）
-  ui/                      theme（双主题）· wave_form（波形窗）· main_form
-  plugins/                 modbus_rtu（Modbus 主站）· spectrum（频谱）· _template（模板）
+  qt/                      ★ Qt 主线（v1.1.0+）：core（纯逻辑）/ ui（分层窗体）/ selftest.py（离屏自测 24 组）/ headless_main.py（无头管线）
+                           深入文档见 qt/README_QT.md（里程碑 M1~M5、与主线对齐口径）
+  serial_terminal_v6.ps1   PowerShell 存档版主脚本（封版 v1.0.0）
+  launch_serial_terminal_v6.vbs / .cmd   PS 版双击启动器
+  core/                    PS 版：serial_io（IO·日志·设置）· protocol（波形协议）· fault_decode · headless · control_channel
+  ui/                      PS 版：theme（双主题）· wave_form（波形窗）· main_form
+  plugins/                 PS 版插件：modbus_rtu（Modbus 主站）· spectrum（频谱）· _template（模板）
   docs/                    插件接入指南 · UI 重构设计稿 · screenshots/
   README_V6.md             V6 架构与开发笔记（模块地图 / 开发红线 / 设计取舍）
+  README_QT.md → qt/README_QT.md   Qt 版里程碑与验收线
   README_V5.md / AI_INTERFACE.md   V5 行为冻结项与 AI 控制通道接口
 ```
 
