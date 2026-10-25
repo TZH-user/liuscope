@@ -300,6 +300,85 @@ def test_find_time_mode():
     print('FIND TIME OK')
 
 
+def test_auto_log_export():
+    """B6/B7：自动日志落盘（懒建文件/SYS 不落/勾选关闭丢弃）+ 日志导出。"""
+    import os
+    import tempfile
+
+    from PySide6 import QtWidgets
+
+    import ui.main_window as mw
+    from core.auto_log import AutoLogWriter, build_log_export_text, format_entry_block
+    from datetime import datetime
+
+    # 纯逻辑：块格式与主线同构
+    block = format_entry_block(datetime(2026, 10, 24, 10, 0, 0, 123000), 'RX', 'boot ok')
+    assert block == '[2026-10-24 10:00:00.123] RX\r\nboot ok\r\n\r\n'
+
+    tmp_dir = tempfile.mkdtemp(prefix='qt_auto_log_')
+    writer = AutoLogWriter(tmp_dir, now_fn=lambda: 1761271200.0)  # 固定文件名时刻
+    assert not writer.active and writer.path is None
+    writer.enqueue(format_entry_block(datetime(2026, 10, 24, 10, 0, 1), 'RX', 'line-1'))
+    assert writer.pending_count() == 1
+    assert writer.flush()
+    assert writer.active and 'serial_auto_log_' in os.path.basename(writer.path)
+    writer.enqueue(format_entry_block(datetime(2026, 10, 24, 10, 0, 2), 'TX', 'AT'))
+    writer.close()
+    with open(writer.path, encoding='utf-8', newline='') as f:
+        content = f.read()
+    assert 'line-1' in content and '[2026-10-24 10:00:02.000] TX\r\nAT\r\n\r\n' in content
+
+    # 导出文本构建：头行 + 正文 + 空行
+    entries = [
+        {'ts': datetime(2026, 10, 24, 10, 0, 0), 'direction': 'RX', 'text': 'hello'},
+        {'ts': datetime(2026, 10, 24, 10, 0, 1), 'direction': 'SYS', 'text': 'note'},
+    ]
+    export_text = build_log_export_text(entries)
+    assert export_text == ('[2026-10-24 10:00:00.000] RX\nhello\n\n'
+                           '[2026-10-24 10:00:01.000] SYS\nnote\n\n')
+
+    # 主窗体集成：注入临时日志目录
+    old_get_log_dir = mw.get_log_dir
+    mw.get_log_dir = lambda: tmp_dir
+    try:
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+        win = mw.MainWindow()
+        win.show()
+        win.wave.state.enabled = False
+        win.combo_rx_format.setCurrentText('ASCII')
+        win.chk_auto_save.setChecked(True)
+        before = os.listdir(tmp_dir)
+        win.ingest_bytes(b'log-me\n')          # RX 入队
+        win._append_log('SYS', 'sys-note')      # SYS 不入队
+        assert win._auto_log.pending_count() == 1, 'SYS 不该进自动日志'
+        win.on_flush_tick()                     # 落盘 + 标签更新
+        assert '日志: ' in win.lbl_log_path.text()
+        after = os.listdir(tmp_dir)
+        assert len(after) == len(before) + 1
+        latest = max(os.path.join(tmp_dir, n) for n in after)
+        with open(latest, encoding='utf-8', newline='') as f:
+            assert 'log-me' in f.read()
+
+        # 勾选关闭：积压直接丢，不落盘
+        win.chk_auto_save.setChecked(False)
+        win.ingest_bytes(b'dropped\n')
+        win._flush_auto_log()
+        assert win._auto_log.pending_count() == 0
+
+        # 导出日志（直接调内部方法避免文件对话框）
+        export_path = os.path.join(tmp_dir, 'export_test.txt')
+        win._export_log_to(export_path)
+        with open(export_path, encoding='utf-8') as f:
+            exported = f.read()
+        assert 'log-me' in exported, '导出文本应包含 RX 条目'
+        assert '日志已导出到' in win.log.toPlainText(), '完成提示进窗口日志（导出文件先写后记，不含自身）'
+        win._port_watch_timer.stop()
+        win.close()
+    finally:
+        mw.get_log_dir = old_get_log_dir
+    print('AUTO LOG OK')
+
+
 def test_wave_protocols():
     """三协议解码 + 视图模型 + 滤波 + 快照合同（对齐主线 SelfTest 断言口径）。"""
     import struct
@@ -887,6 +966,7 @@ def run_selftest() -> int:
     test_terminal_chrome()
     test_ports_watch()
     test_find_time_mode()
+    test_auto_log_export()
     test_wave_protocols()
     test_wave_window()
     test_main_window_m3()

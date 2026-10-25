@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import datetime
 import html
+import os
 import time
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from core import APP_NAME, APP_VERSION, REPO_URL
+from core.auto_log import AutoLogWriter, build_log_export_text, format_entry_block, get_log_dir
 from core.hexutil import bytes_to_hex_text, try_parse_hex_text
 from core.ports import (port_display_text, port_name_from_display,
                         pick_auto_connect_port, scan_port_infos)
@@ -85,6 +87,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tx_bytes_total = 0
         self._known_port_names: list[str] | None = None  # 热插拔基线（None=还没首扫）
         self._connected_device = ''
+        self._auto_log = AutoLogWriter(get_log_dir())
 
         # ---- 顶部连接行 ----
         self.combo_port = QtWidgets.QComboBox()
@@ -125,9 +128,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_clear_log = QtWidgets.QPushButton('清空记录')
         self.btn_clear_log.setObjectName('tool')
         self.btn_clear_log.clicked.connect(self.clear_log)
+        self.btn_export_log = QtWidgets.QPushButton('导出日志')
+        self.btn_export_log.setObjectName('tool')
+        self.btn_export_log.setToolTip('把当前 RX 日志（全部条目）导出为文本文件')
+        self.btn_export_log.clicked.connect(self._export_log)
+        self.chk_auto_save = QtWidgets.QCheckBox('自动保存日志')
+        self.chk_auto_save.setChecked(True)
+        self.chk_auto_save.setToolTip('收发的每条日志实时追加到 logs/serial_auto_log_*.txt（SYS 除外）')
+        self.lbl_log_path = QtWidgets.QLabel('自动日志将在首次收到数据后生成到 logs 目录')
+        self.lbl_log_path.setObjectName('backlog')
+
         logbar = QtWidgets.QHBoxLayout()
+        logbar.addWidget(self.chk_auto_save)
+        logbar.addWidget(self.lbl_log_path, 1)
         logbar.addWidget(self.btn_clear_log)
-        logbar.addStretch(1)
+        logbar.addWidget(self.btn_export_log)
 
         # ---- 底部发送行 ----
         self.combo_rx_format = QtWidgets.QComboBox()
@@ -412,6 +427,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.stop()
         self.worker.deleteLater()
         self.worker = None
+        self._auto_log.close()  # 断开即落盘收尾（文件名保留，重连后追加同一文件）
 
     def set_status(self, text: str, obj_name: str):
         self.lbl_status.setText(text)
@@ -423,6 +439,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._save_connect_settings()
         if getattr(self, '_port_watch_timer', None):
             self._port_watch_timer.stop()
+        self._auto_log.close()
         self.wave.stop_timers()
         self.spectrum.stop_timers()
         self._stop_file_send('窗口关闭')
@@ -505,7 +522,36 @@ class MainWindow(QtWidgets.QMainWindow):
         tail = self.buffer.poll_idle_flush(now)
         if tail is not None:
             self._append_log('RX', f'{tail} (空闲落显)')
+        self._flush_auto_log()
         self._update_backlog()
+
+    def _flush_auto_log(self):
+        """自动日志节拍：勾选开 → 懒建文件落盘；勾选关 → 积压直接丢（对齐主线）。"""
+        if not self.chk_auto_save.isChecked():
+            self._auto_log.discard()
+            return
+        if self._auto_log.flush() and self._auto_log.path:
+            self.lbl_log_path.setText(f'日志: {self._auto_log.path}')
+
+    def _export_log(self):
+        default_name = f'serial_export_{datetime.datetime.now():%Y%m%d_%H%M%S}.txt'
+        log_dir = get_log_dir()
+        os.makedirs(log_dir, exist_ok=True)
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, '导出日志', os.path.join(log_dir, default_name),
+            '文本日志 (*.txt);;所有文件 (*.*)')
+        if not path:
+            return
+        try:
+            self._export_log_to(path)
+        except OSError as exc:
+            self._append_log('SYS', f'导出日志失败: {exc}')
+            QtWidgets.QMessageBox.warning(self, '导出失败', str(exc))
+
+    def _export_log_to(self, path: str):
+        with open(path, 'w', encoding='utf-8', newline='') as f:
+            f.write(build_log_export_text(self.message_entries))
+        self._append_log('SYS', f'日志已导出到:\n{path}')
 
     def _on_rx_format_changed(self, _text: str):
         # 切格式时把残行落到日志，避免"看起来丢了"
@@ -526,6 +572,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if len(self.message_entries) > MAX_LOG_ENTRIES:
             # 长跑防涨：与主线同款裁剪量（丢最老 4000 条）
             del self.message_entries[:MAX_LOG_TRIM]
+        if direction != 'SYS' and self.chk_auto_save.isChecked():
+            self._auto_log.enqueue(format_entry_block(now, direction, text))
         color = {'RX': RX_COLOR, 'TX': TX_COLOR}.get(direction, SYS_COLOR)
         safe = html.escape(text)
         self.log.append(
