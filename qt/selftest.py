@@ -436,6 +436,64 @@ def test_log_hover():
     print('LOG HOVER OK')
 
 
+def test_fault_decode_and_ai_doc():
+    """B9/B10：STM32 HardFault dump 解码 + AI 接入说明文档。"""
+    from core.ai_doc import get_ai_format_doc
+    from core.fault_decode import test_fault_dump_line
+    from core.wave_state import WaveState
+
+    # 无关行不受影响
+    assert test_fault_dump_line('boot ok') is None
+    assert test_fault_dump_line('MMFAR=0x123') is None, '缺 CFSR/HFSR 不触发'
+    # CFSR=0x00020000 → UFSR.INVSTATE；HFSR FORCED
+    got = test_fault_dump_line('CFSR: 0x00020000 HFSR: 0x40000000')
+    assert got and 'CFSR=0x00020000' in got and 'UFSR.INVSTATE' in got
+    assert 'HFSR.FORCED 强制升级为HardFault(具体原因查CFSR)' in got
+    # BFSR.PRECISERR + BFAR 出错地址
+    got = test_fault_dump_line('CFSR=0x00008200, BFAR=0x12345678')
+    assert 'BFSR.PRECISERR 精确数据总线错误' in got
+    assert 'BFSR.BFARVALID 出错地址 BFAR=0x12345678' in got
+    # UFSR.NOCP（未使能 FPU）+ 非对齐（注意主线正则不允许 CFSR 和冒号间有空格）
+    got = test_fault_dump_line('CFSR: 0x01090000')
+    assert 'UFSR.NOCP 调用无协处理器(常见:未使能FPU却用浮点)' in got
+    assert 'UFSR.UNALIGNED 非对齐访问' in got
+    # 全 0：位都没置
+    got = test_fault_dump_line('CFSR: 0x00000000')
+    assert '各错误位均未置位' in got
+
+    # 主窗体 hook：RX 命中 dump 自动追加 SYS 解码行
+    from PySide6 import QtWidgets
+    from ui.main_window import MainWindow
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
+    win.wave.state.enabled = False
+    win.combo_rx_format.setCurrentText('ASCII')
+    win._append_log('RX', 'CFSR: 0x00020000')
+    sys_texts = [e['text'] for e in win.message_entries if e['direction'] == 'SYS']
+    assert any('HardFault 解码' in t and 'UFSR.INVSTATE' in t for t in sys_texts)
+    win._port_watch_timer.stop()
+    win.close()
+
+    # AI 接入说明：三协议关键要素齐备 + 未知协议回落 FireWater
+    fw = get_ai_format_doc('FireWater')
+    assert 'FireWater' in fw and 'ch0' in fw and 'printf' in fw
+    jf = get_ai_format_doc('JustFloat')
+    assert 'float32' in jf and '0x80' in jf and 'Serial.write' in jf
+    rd = get_ai_format_doc('RawData')
+    assert '0~255' in rd and '单通道' in rd
+    assert get_ai_format_doc('Nope') == get_ai_format_doc('FireWater')
+
+    # 波形窗「格式说明」对话框可以拉起（不阻塞：直接构造内部控件）
+    from ui.wave_window import WaveWindow
+    wave = WaveWindow()
+    assert 'JustFloat' in wave.FORMAT_HELP_TEXT and 'RawData' in wave.FORMAT_HELP_TEXT
+    wave._copy_ai_doc()  # 复制到剪贴板（离屏环境可运行）
+    assert QtWidgets.QApplication.clipboard().text() == get_ai_format_doc('FireWater')
+    wave.stop_timers()
+    print('FAULT/AI DOC OK')
+
+
 def test_wave_protocols():
     """三协议解码 + 视图模型 + 滤波 + 快照合同（对齐主线 SelfTest 断言口径）。"""
     import struct
@@ -1025,6 +1083,7 @@ def run_selftest() -> int:
     test_find_time_mode()
     test_auto_log_export()
     test_log_hover()
+    test_fault_decode_and_ai_doc()
     test_wave_protocols()
     test_wave_window()
     test_main_window_m3()

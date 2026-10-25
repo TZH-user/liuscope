@@ -18,10 +18,11 @@ import struct
 import time
 
 import numpy as np
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 import pyqtgraph as pg
 
+from core.ai_doc import get_ai_format_doc
 from core.settings import read_setting, write_setting
 from core.wave_state import FILTERS, PROTOCOLS, WaveState
 
@@ -91,6 +92,11 @@ class WaveWindow(QtWidgets.QWidget):
         self.btn_csv.setObjectName('tool')
         self.btn_csv.clicked.connect(self._export_csv)
 
+        self.btn_format = QtWidgets.QPushButton('格式说明')
+        self.btn_format.setObjectName('tool')
+        self.btn_format.setToolTip('三协议数据格式速查；一键复制给 AI 的接入说明')
+        self.btn_format.clicked.connect(self._show_format_dialog)
+
         toolbar = QtWidgets.QHBoxLayout()
         toolbar.addWidget(QtWidgets.QLabel('协议'))
         toolbar.addWidget(self.combo_protocol)
@@ -103,6 +109,7 @@ class WaveWindow(QtWidgets.QWidget):
         toolbar.addWidget(self.btn_clear)
         toolbar.addWidget(self.btn_sim)
         toolbar.addWidget(self.btn_csv)
+        toolbar.addWidget(self.btn_format)
         toolbar.addStretch(1)
 
         # ---- Y 轴行 ----
@@ -361,6 +368,66 @@ class WaveWindow(QtWidgets.QWidget):
             vals = (math.sin(t), math.cos(t * 0.7) * 0.8, random.uniform(-0.3, 0.3))
             line = ','.join(f'{v:.3f}' for v in vals)
             st.consume_bytes((line + '\n').encode('ascii'))
+
+    # ---------- 数据格式说明 / AI 接入说明 ----------
+
+    FORMAT_HELP_TEXT = """FireWater（文本协议，默认）
+  每行输出各通道数值，逗号分隔，换行(\\n)结束一帧：
+    printf("%.4f,%.4f\\n", ch0, ch1);
+  示例行: 1.23,4.56
+  支持负数/小数/科学计数法(1.5e-3)，单行最多 32 通道，
+  行首 $ 视为命令行自动忽略，含 ANSI 颜色序列的行会先清洗再解析。
+
+JustFloat（二进制协议）
+  N 个 float32（小端）+ 固定帧尾 0x00 0x00 0x80 0x7F：
+    float ch[3];
+    ch[0]=1.2f; ch[1]=3.4f; ch[2]=5.6f;
+    HAL_UART_Transmit(&huart,(uint8_t*)ch,sizeof(ch),10);
+    uint8_t tail[4]={0x00,0x00,0x80,0x7F};
+    HAL_UART_Transmit(&huart,tail,4,10);
+  通道数 = 帧长/4，帧间通道数可以变化；帧尾丢失自动重同步。
+
+RawData（原始字节流）
+  每个字节(0~255)直接作为一个采样点，单通道连续波形：
+    HAL_UART_Transmit(&huart,(uint8_t*)adc_buf,len,10);
+  适合 ADC 等高速连续采样流，无帧头帧尾、无通道交织。
+
+-------------------- 提示 --------------------
+ 1. 波形不动时先核对「协议」下拉框是否与设备输出一致；
+    串口有数据但帧数为 0 时状态栏会出现"疑似协议不匹配"提示。
+ 2. 三种协议都在字节级解析，与接收格式(ASCII/HEX)显示互不影响；
+    二进制协议在正文区显示为乱码属正常现象。
+ 3. 「模拟数据」按钮会按当前协议自动生成测试信号。"""
+
+    def _show_format_dialog(self):
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle('数据格式说明')
+        dlg.resize(640, 520)
+        layout = QtWidgets.QVBoxLayout(dlg)
+        text = QtWidgets.QPlainTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(self.FORMAT_HELP_TEXT)
+        text.setFont(QtGui.QFont('Consolas', 10))
+        layout.addWidget(text, 1)
+
+        buttons = QtWidgets.QHBoxLayout()
+        btn_copy = QtWidgets.QPushButton('复制AI接入说明')
+        btn_copy.setToolTip('按当前协议生成一段可直接粘给 AI 的接入要求文案')
+        btn_copy.clicked.connect(lambda: self._copy_ai_doc(dlg))
+        btn_close = QtWidgets.QPushButton('关闭')
+        btn_close.clicked.connect(dlg.accept)
+        buttons.addWidget(btn_copy)
+        buttons.addStretch(1)
+        buttons.addWidget(btn_close)
+        layout.addLayout(buttons)
+        dlg.exec()
+
+    def _copy_ai_doc(self, dialog: QtWidgets.QDialog | None = None):
+        doc = get_ai_format_doc(self.combo_protocol.currentText())
+        QtWidgets.QApplication.clipboard().setText(doc)
+        if dialog is not None:
+            dialog.setWindowTitle('数据格式说明 — 已复制到剪贴板')
+            QtCore.QTimer.singleShot(1500, lambda: dialog.setWindowTitle('数据格式说明'))
 
     # ---------- 导出 CSV ----------
 

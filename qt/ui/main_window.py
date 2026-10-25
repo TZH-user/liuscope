@@ -18,6 +18,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from core import APP_NAME, APP_VERSION, REPO_URL
 from core.auto_log import AutoLogWriter, build_log_export_text, format_entry_block, get_log_dir
+from core.fault_decode import test_fault_dump_line
 from core.hexutil import bytes_to_hex_text, try_parse_hex_text
 from core.ports import (port_display_text, port_name_from_display,
                         pick_auto_connect_port, scan_port_infos)
@@ -578,6 +579,10 @@ class MainWindow(QtWidgets.QMainWindow):
             del self.message_entries[:MAX_LOG_TRIM]
         if direction != 'SYS' and self.chk_auto_save.isChecked():
             self._auto_log.enqueue(format_entry_block(now, direction, text))
+        if direction == 'RX':
+            decoded = test_fault_dump_line(text)
+            if decoded:
+                self._append_log('SYS', f'HardFault 解码: {decoded}')
         color = {'RX': RX_COLOR, 'TX': TX_COLOR}.get(direction, SYS_COLOR)
         safe = html.escape(text)
         self.log.append(
