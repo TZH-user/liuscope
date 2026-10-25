@@ -557,8 +557,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rx_bytes_total = 0
         self.tx_bytes_total = 0
         self._update_stats_label()
+        self._set_connect_params_locked(True)
+
+    def _set_connect_params_locked(self, locked: bool):
+        """连接期间锁定串口协议参数（改口/改波特率须先断开），置灰提示。"""
+        self.combo_port.setEnabled(not locked)
+        self.combo_baud.setEnabled(not locked)
+        tip = '已连接：断开后才能修改' if locked else ''
+        self.combo_port.setToolTip(tip)
+        self.combo_baud.setToolTip(tip)
 
     def _teardown_worker(self):
+        self._set_connect_params_locked(False)
         if not self.worker:
             return
         self.worker.stop()

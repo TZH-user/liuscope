@@ -242,6 +242,28 @@ def test_ports_watch():
     print('PORT WATCH OK')
 
 
+def test_connect_lock():
+    """连接期间串口协议参数置灰锁定，断开恢复（改口/改波特率须先断开）。"""
+    from PySide6 import QtWidgets
+
+    from ui.main_window import MainWindow
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = MainWindow()
+    win.combo_rx_format.setCurrentText('ASCII')  # ini 可能残留 HEX
+    win.combo_tx_format.setCurrentText('ASCII')
+    assert win.combo_port.isEnabled() and win.combo_baud.isEnabled()
+    win._on_connected()  # 正常路径由 worker.opened 信号触发
+    assert not win.combo_port.isEnabled()
+    assert not win.combo_baud.isEnabled()
+    assert '断开' in win.combo_port.toolTip() and '断开' in win.combo_baud.toolTip()
+    win._teardown_worker()  # worker 为 None 也必须解锁
+    assert win.combo_port.isEnabled() and win.combo_baud.isEnabled()
+    assert win.combo_port.toolTip() == '' and win.combo_baud.toolTip() == ''
+    win._port_watch_timer.stop()
+    win.close()
+    print('CONNECT LOCK OK')
+
+
 def test_find_time_mode():
     """A5：时间戳查询识别/解析 + 头行定位（对齐主线 find_log_timestamp_jump）。"""
     from datetime import datetime
@@ -1568,6 +1590,7 @@ def run_selftest() -> int:
     test_main_window()
     test_terminal_chrome()
     test_ports_watch()
+    test_connect_lock()
     test_find_time_mode()
     test_auto_log_export()
     test_log_hover()
