@@ -1,4 +1,11 @@
-logs/
+﻿logs/
 gui_settings.txt
 *.tmp
 ~$\*
+__pycache__/
+*.pyc
+gui_settings_qt.ini
+build/
+dist/
+*.spec
+wave_presets.txt
