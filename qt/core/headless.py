@@ -320,8 +320,10 @@ def run_headless(opts: HeadlessOptions, serial_factory=None, print_fn=print) -> 
         if serial_factory is None:
             def serial_factory(port, baud, dtr, rts):  # noqa: E306 - 默认 pyserial
                 import serial as pyserial
-                return pyserial.Serial(port, baud, timeout=0.1, write_timeout=1.0,
-                                       dtr=dtr, rts=rts)
+                s = pyserial.Serial(port, baud, timeout=0.1, write_timeout=1.0)
+                s.dtr = dtr  # pyserial 构造器不收 dtr/rts，开完后设属性
+                s.rts = rts
+                return s
         started_at = time.monotonic()
         serial = serial_factory(opts.port, opts.baud, opts.enable_dtr, opts.enable_rts)
         print_fn(f"已连接 {opts.port} @ {opts.baud} | 协议 {opts.protocol} | "
@@ -451,7 +453,10 @@ def _reset_pulse(opts: HeadlessOptions, serial_factory, print_fn):
     if factory is None:
         def factory(port, baud, dtr, rts):  # noqa: E306
             import serial as pyserial
-            return pyserial.Serial(port, baud, timeout=0.1, dtr=dtr, rts=rts)
+            s = pyserial.Serial(port, baud, timeout=0.1)
+            s.dtr = dtr  # 同上：属性方式设线路电平
+            s.rts = rts
+            return s
     port = factory(opts.port, opts.baud, opts.reset_mode == 'dtr',
                    opts.reset_mode == 'rts')
     try:
