@@ -853,7 +853,9 @@ def test_control_channel():
         win._control_channel._port = 0
         assert win._control_channel.start()
     assert win._control_channel.listening, '控制通道应默认开启'
-    assert 'AI 控制通道已开启' in win.log.toPlainText()
+    log_text = win.log.toPlainText()
+    assert ('AI 控制通道已开启' in log_text) or ('端口被占用' in log_text), \
+        '默认开启成功或被占用降级提示，二者必有其一'
     # 一键复制接入信息：剪贴板有内容且带通道地址，日志有成功提示
     win.act_copy_ai.trigger()
     clip = QtWidgets.QApplication.clipboard().text()
@@ -1193,21 +1195,41 @@ def test_wave_window():
     wave.repaint_wave()
     assert wave.state.frame_total == 0
 
-    # ---- 历史滑块（主线复刻）：拖动定位历史，最右端=跟随 ----
+    # ---- 三点历史滑块（主线语义：左右点拖宽度、中点拖中心位置）----
+    bar = wave.slider_view
+    bar.resize(600, 34)
     for i in range(3000):
         wave.state.consume_bytes(f'{i}\n'.encode())
     wave.repaint_wave()
-    assert wave.slider_view.maximum() > 0, '缓冲超出窗口后滑块应可用'
-    wave._on_slider_moved(20)
-    start, _end, follow = wave.state.view_range()
-    assert not follow and start == 20, '拖到 20 → 历史窗口起点 20'
-    wave._on_slider_moved(wave.slider_view.maximum())
-    _s, _e, follow = wave.state.view_range()
-    assert follow, '拖到最右端 → 恢复跟随'
-    # 滑块与视图同步：历史位置时滑块值=窗口起点
-    wave._on_slider_moved(100)
-    wave.repaint_wave()
-    assert wave.slider_view.value() == 100
+    pts = bar._points()
+    assert pts is not None, '缓冲 >2 帧后滑块条有点位'
+    xs, xm, xe, _total = pts
+    assert abs(xm - (xs + xe) / 2) < 1e-6, '中点恒在两点正中'
+    assert bar._hit(xs) == 'start' and bar._hit(xe) == 'end' and bar._hit(xm) == 'mid'
+    assert bar._hit(2) == 'none', '轨道外不命中'
+    # 拖中点：宽度不变，窗口中心跟随鼠标（拖到 25% 位置）
+    w_before = int(wave.state.window_frames)
+    bar._begin_drag('mid', xm)
+    x_target = bar.MARGIN + 0.25 * (600 - 2 * bar.MARGIN)
+    bar._drag_to(x_target)
+    start, end, follow = wave.state.view_range()
+    assert not follow, '中点拖离右端 → 历史模式'
+    assert abs((end - start) - w_before) <= 2, '中点拖动宽度不变'
+    assert abs((start + end) / 2 - 0.25 * 2999) < 30, '窗口中心跟随鼠标位置'
+    # 拖左点：右端钉住，宽度收窄
+    end_before = end
+    xs2 = bar._points()[0]
+    bar._begin_drag('start', xs2)
+    bar._drag_to(xs2 + 80)
+    s2, e2, _f2 = wave.state.view_range()
+    assert e2 == end_before, '拖左点右端钉住'
+    assert (e2 - s2) < (end_before - start), '左点右移 → 窗口收窄'
+    # 拖右点贴到最右 → 恢复跟随
+    xe3 = bar._points()[2]
+    bar._begin_drag('end', xe3)
+    bar._drag_to(600 - bar.MARGIN)
+    _s3, _e3, follow3 = wave.state.view_range()
+    assert follow3, '右点拖到最右端 → 恢复跟随'
 
     # ---- 滚轮缩放（主线语义） ----
     # 横轴区滚轮：窗口帧数 ×0.8（跟随态下贴末尾）

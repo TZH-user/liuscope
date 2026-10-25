@@ -26,10 +26,13 @@ from core.ai_doc import get_ai_format_doc
 from core.settings import read_setting, write_setting
 from core.wave_presets import WavePreset, default_presets_path, load_wave_presets, save_wave_presets
 from core.wave_state import FILTERS, PROTOCOLS, WaveState
+from ui.wave_slider import WaveSliderBar
 from ui.xy_view import XYSection
 
-CURVE_COLORS = ['#4EC9B0', '#569CD6', '#CE9178', '#C586C0',
-                '#DCDCAA', '#F48771', '#9CDCFE', '#D4D4D4']
+CURVE_COLORS = ['#00C8FF', '#FF6E6E', '#78FF8C', '#FFDC00',
+                '#FF82FF', '#AA8CFF', '#FFA03C', '#00FFC8',
+                '#5AA0FF', '#FF69B4', '#B4FF3C', '#FFFA96',
+                '#0096FF', '#C878FF', '#78DC78', '#FFC878']  # 主线 get_wave_channel_color 16 色同色号
 WINDOW_PRESETS = ('200', '500', '1000', '2000', '5000', '10000', '50000')
 
 pg.setConfigOptions(antialias=False, background='#161B26', foreground='#8A93A6')
@@ -203,10 +206,8 @@ class WaveWindow(QtWidgets.QWidget):
         # 拦下 pyqtgraph 默认滚轮，由事件过滤器接管
         self.plot.viewport().installEventFilter(self)
 
-        # ---- 历史浏览滑块（主线同款）：拖动定位视图窗口，最右端=跟随实时 ----
-        self.slider_view = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.slider_view.setEnabled(False)
-        self.slider_view.sliderMoved.connect(self._on_slider_moved)
+        # ---- 历史滑块条（主线复刻）：红=起点拖宽度、绿=中心拖位置、紫=终点拖宽度 ----
+        self.slider_view = WaveSliderBar(self.state)
 
         # ---- 状态行 ----
         self.lbl_stats = QtWidgets.QLabel('帧 0 | 解析失败 0 | FPS 0 | 视图: 跟随')
@@ -426,9 +427,9 @@ class WaveWindow(QtWidgets.QWidget):
             fill_level = y_min - 0.05 * max(y_max - y_min, 1e-9)
             for curve in self._curves:
                 curve.setFillLevel(fill_level)
-        self._sync_slider()
+        self.slider_view.update()
 
-    # ---------- 曲线填充 / 历史滑块 / 滚轮缩放 ----------
+    # ---------- 曲线填充 / 滚轮缩放 ----------
 
     def _apply_fill_to_curve(self, curve, index: int):
         """按开关与通道色应用/撤销线下浅填充（主线：同色 alpha=26/255）。"""
@@ -447,22 +448,6 @@ class WaveWindow(QtWidgets.QWidget):
         for i, curve in enumerate(self._curves):
             self._apply_fill_to_curve(curve, i)
         self.repaint_wave()
-
-    def _sync_slider(self):
-        """按当前视图同步滑块位置：跟随=最右端，历史=窗口起点。"""
-        st = self.state
-        start, _end, follow = st.view_range()
-        window = max(st.MIN_WINDOW, int(st.window_frames))
-        span = max(0, int(st.frame_total) - window)
-        self.slider_view.setMaximum(max(0, span))
-        self.slider_view.setPageStep(max(1, window // 2))
-        self.slider_view.setValue(span if follow else max(0, min(start, span)))
-        self.slider_view.setEnabled(span > 0)
-
-    def _on_slider_moved(self, value: int):
-        st = self.state
-        window = max(st.MIN_WINDOW, int(st.window_frames))
-        st.set_view_window(value, value + window)
 
     def _on_plot_wheel(self, ev):
         zoom_in = ev.angleDelta().y() > 0
