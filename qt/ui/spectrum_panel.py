@@ -271,7 +271,8 @@ class SpectrumPanel(QtWidgets.QWidget):
             self._waterfall.pop()
         if len(self._waterfall) < 2:
             return
-        img = np.stack(self._waterfall[::-1])  # 最旧在底、最新在顶
+        # 列表 index 0 = 最新一行 → 图像顶部；旧行被顶向下方（与主线一致）
+        img = np.stack(self._waterfall)
         self._wf_image.setImage(img, autoLevels=False)
         self._wf_image.setRect(QtCore.QRectF(0, 0, analysis['fs'] / 2.0, len(self._waterfall)))
         self.wf_plot.setXRange(0, analysis['fs'] / 2.0, padding=0)

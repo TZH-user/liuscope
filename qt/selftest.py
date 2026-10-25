@@ -602,6 +602,7 @@ def test_spectrum_dsp():
 def test_spectrum_panel():
     import math
 
+    import numpy as np
     from PySide6 import QtWidgets
 
     from ui.main_window import MainWindow
@@ -642,6 +643,16 @@ def test_spectrum_panel():
     panel.repaint_spectrum()
     assert len(panel._waterfall) == rows_at_freeze, '冻结时瀑布不进新行'
     panel.btn_freeze.setChecked(False)
+
+    # 瀑布方向：新行在顶（图像第 0 行 == 最新一行，旧行被顶向下）
+    panel.chk_wf.setChecked(True)
+    panel.repaint_spectrum()
+    top_row = panel._waterfall[0]
+    panel.repaint_spectrum()  # 数据没变，但再推进一帧序列
+    from core.dsp import waterfall_row as _wf_row
+    scale = panel._read_scale()
+    expected = _wf_row(panel.analyze()['db'], scale[2], scale[0], 1.0)
+    assert np.array_equal(panel._wf_image.image[0], expected), '图像顶部必须是最新谱行'
 
     win.close()
     print('SPECTRUM PANEL OK')
