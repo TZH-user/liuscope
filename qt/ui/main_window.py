@@ -86,6 +86,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._max_log_blocks = 20000
         self._file_send: dict | None = None
         self._modbus_rx_acc = bytearray()  # Modbus 事务在途时的响应累积
+        self._modbus_active = False  # 仅事务在途时累积 RX 字节，闲时洪泛不再无界增长
         self.message_entries: list[dict] = []  # {ts, direction, text}：导出/自动日志/控制通道共用
         self.rx_bytes_total = 0
         self.tx_bytes_total = 0
@@ -125,9 +126,14 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(self.lbl_stats, 1)
 
         # ---- 日志区 + 查找条 + 记录操作行 ----
-        self.log = QtWidgets.QTextEdit()
+        # QTextEdit 的 QTextDocument 在 append+裁剪循环下碎片内存不归还（实测 ~1.2KB/行
+        # 只增不减，长跑高流量会到 GB 级）；QPlainTextEdit 由 C++ 侧 maximumBlockCount
+        # 自动裁剪且内存有界（同载荷 15s +2.5MB vs +50MB），appendHtml 保留彩色着色。
+        self.log = QtWidgets.QPlainTextEdit()
         self.log.setReadOnly(True)
-        self.log.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
+        self.log.setUndoRedoEnabled(False)
+        self.log.setMaximumBlockCount(self._max_log_blocks)
+        self.log.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
         # 注意：这里不能再挂控件级静态 tooltip——Qt 会先弹它，抢掉逐行
         # HEX⇄文本转换提示框（LogHoverTip，0.4s 延迟）。
         self._log_hover = LogHoverTip(self.log)
@@ -625,7 +631,8 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             for line in self.buffer.feed(data, now):
                 self._append_log('RX', line)
-        self._modbus_rx_acc.extend(data)
+        if self._modbus_active:
+            self._modbus_rx_acc.extend(data)
         self.wave.consume_bytes(data)
         self._update_backlog()
 
@@ -646,40 +653,43 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.worker:
             return b''
         self._modbus_rx_acc = bytearray()
-        if not self.worker.write_bytes(frame):
-            return b''
-        self._count_tx_bytes(len(frame))
-        deadline = time.monotonic() + timeout_ms / 1000.0
-        idle_at = time.monotonic() + 0.15
-        expected = -1
+        self._modbus_active = True
+        try:
+            if not self.worker.write_bytes(frame):
+                return b''
+            self._count_tx_bytes(len(frame))
+            deadline = time.monotonic() + timeout_ms / 1000.0
+            idle_at = time.monotonic() + 0.15
+            expected = -1
 
-        loop = QtCore.QEventLoop()
-        poll = QtCore.QTimer(loop)
-        poll.setInterval(10)
+            loop = QtCore.QEventLoop()
+            poll = QtCore.QTimer(loop)
+            poll.setInterval(10)
 
-        def check():
-            nonlocal expected, idle_at
-            acc = self._modbus_rx_acc
-            now = time.monotonic()
-            if acc:
-                idle_at = now + 0.15
-                if expected < 0 and len(acc) >= 3:
-                    expected = 5 if (acc[1] & 0x80) else 3 + acc[2] + 2
-                if 0 <= expected <= len(acc):
+            def check():
+                nonlocal expected, idle_at
+                acc = self._modbus_rx_acc
+                now = time.monotonic()
+                if acc:
+                    idle_at = now + 0.15
+                    if expected < 0 and len(acc) >= 3:
+                        expected = 5 if (acc[1] & 0x80) else 3 + acc[2] + 2
+                    if 0 <= expected <= len(acc):
+                        loop.quit()
+                        return
+                    if now > idle_at:
+                        loop.quit()
+                        return
+                if now > deadline:
                     loop.quit()
-                    return
-                if now > idle_at:
-                    loop.quit()
-                    return
-            if now > deadline:
-                loop.quit()
 
-        poll.timeout.connect(check)
-        poll.start()
-        loop.exec()
-        resp = bytes(self._modbus_rx_acc)
-        self._modbus_rx_acc = bytearray()
-        return resp
+            poll.timeout.connect(check)
+            poll.start()
+            loop.exec()
+            return bytes(self._modbus_rx_acc)
+        finally:
+            self._modbus_active = False
+            self._modbus_rx_acc = bytearray()
 
     def on_flush_tick(self):
         now = time.monotonic()
@@ -799,17 +809,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._append_log('SYS', f'HardFault 解码: {decoded}')
         color = {'RX': RX_COLOR, 'TX': TX_COLOR}.get(direction, SYS_COLOR)
         safe = html.escape(text)
-        self.log.append(
+        self.log.appendHtml(
             f'<span style="color:{TIME_COLOR}">[{_stamp()}]</span> '
             f'<b style="color:{color}">{direction}</b> '
             f'<span style="color:{color}">{safe}</span>'
         )
-        if self.log.document().blockCount() > self._max_log_blocks:
-            cursor = self.log.textCursor()
-            cursor.movePosition(cursor.MoveOperation.Start)
-            cursor.movePosition(cursor.MoveOperation.NextBlock,
-                                cursor.MoveMode.KeepAnchor, self._max_log_blocks // 10)
-            cursor.removeSelectedText()
 
     def clear_log(self):
         """清空记录：显示、条目、残行缓冲一并清（字节统计不清——那是连接周期的量）。"""

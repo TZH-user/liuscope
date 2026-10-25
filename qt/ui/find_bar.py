@@ -126,7 +126,7 @@ class FindBar(QtWidgets.QWidget):
         selections = []
         limit = MAX_TIME_HIGHLIGHTS if self._time_mode else len(self._matches)
         for i, cursor in enumerate(self._matches[:limit]):
-            sel = QtWidgets.QTextEdit.ExtraSelection()
+            sel = QtWidgets.QTextEdit.ExtraSelection()  # PySide6 只在 QTextEdit 暴露该结构体；QPlainTextEdit.setExtraSelections 通用
             sel.format = QtGui.QTextCharFormat()
             sel.format.setBackground(HIT_CURRENT_BG if i == self._index else HIT_BG)
             sel.cursor = cursor
