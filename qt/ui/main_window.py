@@ -9,6 +9,7 @@ M3 复刻主线功能口径：
 """
 from __future__ import annotations
 
+import datetime
 import html
 import time
 
@@ -39,8 +40,14 @@ FILE_CHUNK = 4096   # 4 KiB/20ms ≈ 上限 200 KiB/s（对齐主线）
 FILE_INTERVAL_MS = 20
 
 
+MAX_LOG_ENTRIES = 20000
+MAX_LOG_TRIM = 4000
+
+
 def _stamp() -> str:
-    return time.strftime('%H:%M:%S')
+    # 主线同款全时间戳（含毫秒）：日志导出 / 自动日志 / Ctrl+F 时间定位都靠它
+    now = datetime.datetime.now()
+    return f'{now:%Y-%m-%d %H:%M:%S}.{now.microsecond // 1000:03d}'
 
 
 class _UpdateCheckRunnable(QtCore.QRunnable):
@@ -76,6 +83,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._max_log_blocks = 20000
         self._file_send: dict | None = None
         self._modbus_rx_acc = bytearray()  # Modbus 事务在途时的响应累积
+        self.message_entries: list[dict] = []  # {ts, direction, text}：导出/自动日志/控制通道共用
+        self.rx_bytes_total = 0
+        self.tx_bytes_total = 0
 
         # ---- 顶部连接行 ----
         self.combo_port = QtWidgets.QComboBox()
@@ -88,6 +98,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_refresh.clicked.connect(self.refresh_ports)
         self.lbl_status = QtWidgets.QLabel('未连接')
         self.lbl_status.setObjectName('status_err')
+        self.lbl_stats = QtWidgets.QLabel('RX 0.0 KiB | TX 0.0 KiB')
+        self.lbl_stats.setObjectName('backlog')
 
         top = QtWidgets.QHBoxLayout()
         top.addWidget(QtWidgets.QLabel('串口'))
@@ -97,13 +109,21 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(self.combo_baud, 1)
         top.addWidget(self.btn_connect)
         top.addWidget(self.lbl_status, 2)
+        top.addWidget(self.lbl_stats, 1)
 
-        # ---- 日志区 + 查找条 ----
+        # ---- 日志区 + 查找条 + 记录操作行 ----
         self.log = QtWidgets.QTextEdit()
         self.log.setReadOnly(True)
         self.log.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
         self.find_bar = FindBar(self.log)
         self.find_bar.setVisible(False)
+
+        self.btn_clear_log = QtWidgets.QPushButton('清空记录')
+        self.btn_clear_log.setObjectName('tool')
+        self.btn_clear_log.clicked.connect(self.clear_log)
+        logbar = QtWidgets.QHBoxLayout()
+        logbar.addWidget(self.btn_clear_log)
+        logbar.addStretch(1)
 
         # ---- 底部发送行 ----
         self.combo_rx_format = QtWidgets.QComboBox()
@@ -152,6 +172,7 @@ class MainWindow(QtWidgets.QMainWindow):
         terminal_layout = QtWidgets.QVBoxLayout(terminal)
         terminal_layout.setContentsMargins(0, 0, 0, 0)
         terminal_layout.addLayout(top)
+        terminal_layout.addLayout(logbar)
         terminal_layout.addWidget(self.find_bar)
         terminal_layout.addWidget(self.log, 1)
         terminal_layout.addLayout(bottom)
@@ -267,7 +288,14 @@ class MainWindow(QtWidgets.QMainWindow):
                                               self.set_status(f'连接丢失: {msg}', 'status_err'),
                                               self._stop_file_send('串口已断开')))
         self.worker.opened.connect(lambda: self.set_status(f'已连接 {device} @ {baud}', 'status_ok'))
+        self.worker.opened.connect(self._on_connected)
         self.worker.start()
+
+    def _on_connected(self):
+        # 连接周期归零收发统计（对齐主线 reset_receive_stats 时机）
+        self.rx_bytes_total = 0
+        self.tx_bytes_total = 0
+        self._update_stats_label()
 
     def _teardown_worker(self):
         if not self.worker:
@@ -293,6 +321,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def ingest_bytes(self, data: bytes):
         now = time.monotonic()
+        self.rx_bytes_total += len(data)
+        self._update_stats_label()
         if self.combo_rx_format.currentText() == 'HEX':
             # 对齐主线：HEX 显示模式按到达块直接落显；先清掉未成行的文本残行
             tail = self.buffer.drain()
@@ -306,6 +336,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wave.consume_bytes(data)
         self._update_backlog()
 
+    def _update_stats_label(self):
+        self.lbl_stats.setText(
+            f'RX {self.rx_bytes_total / 1024.0:.1f} KiB | '
+            f'TX {self.tx_bytes_total / 1024.0:.1f} KiB')
+
+    def _count_tx_bytes(self, n: int):
+        self.tx_bytes_total += n
+        self._update_stats_label()
+
     def modbus_transport(self, frame: bytes, timeout_ms: int = 600) -> bytes:
         """Modbus 线上事务：清残留 → 写请求 → 有界读响应（对齐主线 send_modbus_wire_transaction）。
 
@@ -316,6 +355,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._modbus_rx_acc = bytearray()
         if not self.worker.write_bytes(frame):
             return b''
+        self._count_tx_bytes(len(frame))
         deadline = time.monotonic() + timeout_ms / 1000.0
         idle_at = time.monotonic() + 0.15
         expected = -1
@@ -369,6 +409,11 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---------- 日志 / 发送 ----------
 
     def _append_log(self, direction: str, text: str):
+        now = datetime.datetime.now()
+        self.message_entries.append({'ts': now, 'direction': direction, 'text': text})
+        if len(self.message_entries) > MAX_LOG_ENTRIES:
+            # 长跑防涨：与主线同款裁剪量（丢最老 4000 条）
+            del self.message_entries[:MAX_LOG_TRIM]
         color = {'RX': RX_COLOR, 'TX': TX_COLOR}.get(direction, SYS_COLOR)
         safe = html.escape(text)
         self.log.append(
@@ -383,6 +428,14 @@ class MainWindow(QtWidgets.QMainWindow):
                                 cursor.MoveMode.KeepAnchor, self._max_log_blocks // 10)
             cursor.removeSelectedText()
 
+    def clear_log(self):
+        """清空记录：显示、条目、残行缓冲一并清（字节统计不清——那是连接周期的量）。"""
+        self.buffer.clear()
+        self.message_entries.clear()
+        self.log.clear()
+        self._append_log('SYS', '消息记录已清空。')
+        self._update_backlog()
+
     def send(self):
         raw = self.edit_send.text()
         if not raw:
@@ -392,6 +445,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not payload_bytes:
             return
         sent = bool(self.worker and self.worker.write_bytes(payload_bytes))
+        if sent:
+            self._count_tx_bytes(len(payload_bytes))
         suffix = '' if sent else '  (未连接，仅入日志)'
         self._append_log('TX', display_text + suffix)
         self.edit_send.push_history(raw)
@@ -462,6 +517,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not ok:
             self._stop_file_send('写入失败: 串口未打开')
             return
+        self._count_tx_bytes(len(chunk))
         state['pos'] += len(chunk)
         if state['pos'] >= len(data):
             self._stop_file_send('完成')

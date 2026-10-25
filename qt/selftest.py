@@ -80,6 +80,51 @@ def test_main_window():
     print('MAINWINDOW OK')
 
 
+def test_terminal_chrome():
+    """A1/A2：清空记录 + 收发字节统计 + 全时间戳 + 日志条目列表。"""
+    from PySide6 import QtWidgets
+
+    from ui.main_window import MainWindow
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
+    win.wave.state.enabled = False
+
+    # 全时间戳：条目与日志头行都带日期（Ctrl+F 时间定位的数据基础）
+    win.ingest_bytes(b'boot v1.0\n')
+    entry = win.message_entries[-1]
+    assert entry['direction'] == 'RX' and entry['text'] == 'boot v1.0'
+    import re as _re
+    assert _re.search(r'\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\] RX boot v1\.0',
+                      win.log.toPlainText()), '日志头行必须是全时间戳'
+    assert win.rx_bytes_total == len(b'boot v1.0\n')
+    assert 'RX 0.0 KiB | TX 0.0 KiB' in win.lbl_stats.text()
+
+    # 清空记录：显示/条目/残行缓冲全清，字节统计保留（连接周期量）
+    win.ingest_bytes(b'temp=41.5\n')
+    win.btn_clear_log.click()
+    assert len(win.message_entries) == 1
+    assert win.message_entries[0]['text'] == '消息记录已清空。'
+    assert win.buffer.backlog_bytes == 0
+    assert win.rx_bytes_total > 0, '字节统计不清零'
+    assert '消息记录已清空。' in win.log.toPlainText()
+
+    # 条目上限裁剪：>上限丢最老（注入小上限避免真灌 2 万条）
+    win.message_entries.clear()
+    import ui.main_window as mw
+    old_max, old_trim = mw.MAX_LOG_ENTRIES, mw.MAX_LOG_TRIM
+    mw.MAX_LOG_ENTRIES, mw.MAX_LOG_TRIM = 10, 4
+    for i in range(12):
+        win._append_log('RX', f'LINE-{i}')
+    mw.MAX_LOG_ENTRIES, mw.MAX_LOG_TRIM = old_max, old_trim
+    assert len(win.message_entries) == 8
+    assert win.message_entries[0]['text'] == 'LINE-4', '应丢最老的 4 条'
+
+    win.close()
+    print('TERMINAL CHROME OK')
+
+
 def test_wave_protocols():
     """三协议解码 + 视图模型 + 滤波 + 快照合同（对齐主线 SelfTest 断言口径）。"""
     import struct
@@ -664,6 +709,7 @@ def run_selftest() -> int:
     test_rx_buffer()
     test_hexutil()
     test_main_window()
+    test_terminal_chrome()
     test_wave_protocols()
     test_wave_window()
     test_main_window_m3()
