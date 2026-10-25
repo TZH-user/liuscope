@@ -24,6 +24,7 @@ import pyqtgraph as pg
 
 from core.ai_doc import get_ai_format_doc
 from core.settings import read_setting, write_setting
+from core.wave_presets import WavePreset, default_presets_path, load_wave_presets, save_wave_presets
 from core.wave_state import FILTERS, PROTOCOLS, WaveState
 
 CURVE_COLORS = ['#4EC9B0', '#569CD6', '#CE9178', '#C586C0',
@@ -51,6 +52,7 @@ class WaveWindow(QtWidgets.QWidget):
         self._sim_timer = QtCore.QTimer(self)
         self._sim_timer.timeout.connect(self._on_sim_tick)
         self._sim_t = 0.0
+        self._preset_syncing = False
 
         # ---- 工具行 ----
         self.combo_protocol = QtWidgets.QComboBox()
@@ -97,6 +99,22 @@ class WaveWindow(QtWidgets.QWidget):
         self.btn_format.setToolTip('三协议数据格式速查；一键复制给 AI 的接入说明')
         self.btn_format.clicked.connect(self._show_format_dialog)
 
+        # ---- 场景预设（波特率+协议+滤波+Y 量程+窗口 一键切换；文件在仓库根） ----
+        self.presets_path = default_presets_path()
+        self.baud_getter = lambda: ''   # 主窗体注入：读当前波特率
+        self.baud_setter = lambda text: None  # 主窗体注入：写主窗体波特率
+        self.combo_preset = QtWidgets.QComboBox()
+        self.combo_preset.setToolTip('场景预设：一键切波特率/协议/滤波/量程/窗口')
+        self.combo_preset.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        self.combo_preset.currentTextChanged.connect(self._on_preset_selected)
+        self.btn_preset_save = QtWidgets.QPushButton('存预设')
+        self.btn_preset_save.setObjectName('tool')
+        self.btn_preset_save.setToolTip('把当前波特率+协议+滤波+Y 量程+窗口宽度存为场景预设')
+        self.btn_preset_save.clicked.connect(self._save_preset_clicked)
+        self.btn_preset_del = QtWidgets.QPushButton('删预设')
+        self.btn_preset_del.setObjectName('tool')
+        self.btn_preset_del.clicked.connect(self._delete_preset_clicked)
+
         toolbar = QtWidgets.QHBoxLayout()
         toolbar.addWidget(QtWidgets.QLabel('协议'))
         toolbar.addWidget(self.combo_protocol)
@@ -110,6 +128,10 @@ class WaveWindow(QtWidgets.QWidget):
         toolbar.addWidget(self.btn_sim)
         toolbar.addWidget(self.btn_csv)
         toolbar.addWidget(self.btn_format)
+        toolbar.addWidget(QtWidgets.QLabel('预设'))
+        toolbar.addWidget(self.combo_preset)
+        toolbar.addWidget(self.btn_preset_save)
+        toolbar.addWidget(self.btn_preset_del)
         toolbar.addStretch(1)
 
         # ---- Y 轴行 ----
@@ -163,6 +185,8 @@ class WaveWindow(QtWidgets.QWidget):
         self._repaint_timer = QtCore.QTimer(self)
         self._repaint_timer.timeout.connect(self.repaint_wave)
         self._repaint_timer.start(self.REPAINT_INTERVAL_MS)
+
+        self.refresh_presets()  # 场景预设列表（仓库根 wave_presets.txt）
 
         self._stats_timer = QtCore.QTimer(self)
         self._stats_timer.timeout.connect(self._update_stats)
@@ -368,6 +392,84 @@ class WaveWindow(QtWidgets.QWidget):
             vals = (math.sin(t), math.cos(t * 0.7) * 0.8, random.uniform(-0.3, 0.3))
             line = ','.join(f'{v:.3f}' for v in vals)
             st.consume_bytes((line + '\n').encode('ascii'))
+
+    # ---------- 场景预设 ----------
+
+    def refresh_presets(self, select: str = ''):
+        self._preset_syncing = True
+        try:
+            self.combo_preset.clear()
+            for p in load_wave_presets(self.presets_path):
+                self.combo_preset.addItem(p.name)
+            if select:
+                self.combo_preset.setCurrentText(select)
+        finally:
+            self._preset_syncing = False
+
+    def _on_preset_selected(self, name: str):
+        if not name or getattr(self, '_preset_syncing', False):
+            return
+        self.apply_wave_preset(name)
+
+    def apply_wave_preset(self, name: str) -> bool:
+        """逐项写入 → 自动走现有信号处理器（协议切换清缓冲、滤波键失效、Y 手动生效）。
+        波特率只改主窗体选择不强制重连（对齐主线 apply_wave_preset）。"""
+        target = next((p for p in load_wave_presets(self.presets_path) if p.name == name), None)
+        if target is None:
+            return False
+        if target.baud.isdigit():
+            self.baud_setter(target.baud)
+        if self.combo_protocol.findText(target.protocol) >= 0:
+            self.combo_protocol.setCurrentText(target.protocol)
+        if self.combo_filter.findText(target.filter) >= 0:
+            self.combo_filter.setCurrentText(target.filter)
+        if target.filter_param.isdigit():
+            self.spin_filter_param.setValue(int(target.filter_param))
+        self.chk_auto_y.setChecked(target.auto_y)
+        if not target.auto_y:
+            if target.y_min:
+                self.edit_ymin.setText(target.y_min)
+            if target.y_max:
+                self.edit_ymax.setText(target.y_max)
+            self._on_y_limits_edited()
+        if target.window.isdigit():
+            self.combo_window.setCurrentText(target.window)
+        return True
+
+    def capture_wave_preset(self, name: str) -> WavePreset:
+        st = self.state
+        return WavePreset(
+            name=name,
+            baud=self.baud_getter().strip(),
+            protocol=self.combo_protocol.currentText(),
+            filter=self.combo_filter.currentText(),
+            filter_param=str(self.spin_filter_param.value()),
+            auto_y=self.chk_auto_y.isChecked(),
+            y_min=self.edit_ymin.text().strip(),
+            y_max=self.edit_ymax.text().strip(),
+            window=self.combo_window.currentText().strip())
+
+    def _save_preset_clicked(self):
+        default_name = self.combo_preset.currentText() or '新预设'
+        name, ok = QtWidgets.QInputDialog.getText(self, '存预设', '预设名:', text=default_name)
+        name = (name or '').strip()
+        if not ok or not name:
+            return
+        presets = [p for p in load_wave_presets(self.presets_path) if p.name != name]
+        presets.append(self.capture_wave_preset(name))
+        if save_wave_presets(presets, self.presets_path):
+            self.refresh_presets(select=name)
+
+    def _delete_preset_clicked(self):
+        name = self.combo_preset.currentText()
+        if not name:
+            return
+        if QtWidgets.QMessageBox.question(
+                self, '删预设', f'删除预设「{name}」?') != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        presets = [p for p in load_wave_presets(self.presets_path) if p.name != name]
+        save_wave_presets(presets, self.presets_path)
+        self.refresh_presets()
 
     # ---------- 数据格式说明 / AI 接入说明 ----------
 

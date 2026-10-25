@@ -494,6 +494,67 @@ def test_fault_decode_and_ai_doc():
     print('FAULT/AI DOC OK')
 
 
+def test_wave_presets():
+    """C12：波形场景预设 INI 往返 + 一键应用（波特率经主窗体钩子）。"""
+    import os
+    import tempfile
+
+    from core.wave_presets import (WavePreset, default_presets_path,
+                                   load_wave_presets, save_wave_presets)
+    from ui.wave_window import WaveWindow
+
+    assert default_presets_path().endswith('wave_presets.txt')
+
+    # INI 往返（含中文名 / auto_y=0 / 手动量程）
+    tmp = os.path.join(tempfile.mkdtemp(prefix='qt_presets_'), 'wave_presets.txt')
+    tp = WavePreset(name='自测预设', baud='115200', protocol='JustFloat',
+                    filter='滑动平均', filter_param='8', auto_y=False,
+                    y_min='0', y_max='255', window='500')
+    assert save_wave_presets([tp], tmp)
+    with open(tmp, encoding='utf-8-sig') as f:
+        head = f.readline().strip()
+    assert head == '[自测预设]', '应带 BOM 的 UTF-8 INI'
+    round_trip = load_wave_presets(tmp)
+    assert len(round_trip) == 1
+    back = round_trip[0]
+    assert (back.name, back.baud, back.protocol, back.filter, back.filter_param,
+            back.auto_y, back.y_min, back.y_max, back.window) == \
+        ('自测预设', '115200', 'JustFloat', '滑动平均', '8', False, '0', '255', '500')
+    # 损坏文件不抛
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write('[坏预设]\nbaud=not-a-number\n\xff\xfe junk')
+    assert len(load_wave_presets(tmp)) == 1
+
+    # 一键应用：逐项写入控件；波特率经主窗体钩子（这里用局部变量模拟）
+    wave = WaveWindow()
+    baud_values = []
+    wave.presets_path = tmp
+    wave.baud_setter = lambda text: baud_values.append(text)
+    wave.baud_getter = lambda: '921600'
+    assert save_wave_presets([tp], tmp)
+    wave.refresh_presets(select='自测预设')
+    assert wave.combo_preset.count() == 1
+    assert wave.apply_wave_preset('自测预设')
+    assert baud_values == ['115200'], '应用预设应写入波特率'
+    assert wave.combo_protocol.currentText() == 'JustFloat'
+    assert wave.state.protocol == 'JustFloat'
+    assert wave.combo_filter.currentText() == '滑动平均'
+    assert wave.spin_filter_param.value() == 8
+    assert wave.state.filter_param == 8
+    assert not wave.chk_auto_y.isChecked()
+    assert wave.state.y_min == 0.0 and wave.state.y_max == 255.0
+    assert wave.combo_window.currentText() == '500'
+    assert wave.state.window_frames == 500
+
+    # 抓取当前状态为预设快照
+    snap = wave.capture_wave_preset('快照')
+    assert snap.baud == '921600' and snap.protocol == 'JustFloat' and snap.window == '500'
+    # 不存在的预设返回 False
+    assert not wave.apply_wave_preset('不存在')
+    wave.stop_timers()
+    print('WAVE PRESETS OK')
+
+
 def test_wave_protocols():
     """三协议解码 + 视图模型 + 滤波 + 快照合同（对齐主线 SelfTest 断言口径）。"""
     import struct
@@ -1084,6 +1145,7 @@ def run_selftest() -> int:
     test_auto_log_export()
     test_log_hover()
     test_fault_decode_and_ai_doc()
+    test_wave_presets()
     test_wave_protocols()
     test_wave_window()
     test_main_window_m3()

@@ -203,6 +203,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # ---- 页签：终端 / 波形 / 频谱 / Modbus ----
         self.wave = WaveWindow()
+        # 场景预设要读写主窗体波特率（只改选择不重连，对齐主线）
+        self.wave.baud_getter = self.combo_baud.currentText
+        self.wave.baud_setter = self.combo_baud.setCurrentText
         self.spectrum = SpectrumPanel(self.wave.state)
         self.modbus = ModbusPanel()
         self.modbus.transport = self.modbus_transport

@@ -8,3 +8,4 @@ gui_settings_qt.ini
 build/
 dist/
 *.spec
+wave_presets.txt
