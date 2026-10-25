@@ -151,6 +151,14 @@ class WaveWindow(QtWidgets.QWidget):
         toolbar.addWidget(self.btn_preset_del)
         toolbar.addStretch(1)
 
+        # ---- 曲线下方同色浅填充（主线同款：alpha 26/255，铺到绘图区底部）----
+        self.chk_fill = QtWidgets.QCheckBox('曲线填充')
+        # read_setting 只回字符串：缺省视为开（主线口径），仅显式 'false' 关
+        self.chk_fill.setChecked(read_setting('wave/fill_under', 'true').lower() != 'false')
+        self.chk_fill.setToolTip('曲线下方低透明度同色填充（多通道叠加也可读），主线同款')
+        self.chk_fill.toggled.connect(self._on_fill_toggled)
+        toolbar.addWidget(self.chk_fill)
+
         # ---- Y 轴行 ----
         self.chk_auto_y = QtWidgets.QCheckBox('自动Y')
         self.chk_auto_y.setChecked(self.state.auto_y)
@@ -380,6 +388,7 @@ class WaveWindow(QtWidgets.QWidget):
             pen = pg.mkPen(CURVE_COLORS[c % len(CURVE_COLORS)], width=1.2)
             curve = self.plot.plot([], [], pen=pen)
             self._curves.append(curve)
+            self._apply_fill_to_curve(curve, c)
 
     def _rebuild_all(self):
         """协议切换/清空后：曲线与芯片按空缓冲重建。"""
@@ -412,9 +421,32 @@ class WaveWindow(QtWidgets.QWidget):
         y_min, y_max = st.y_range()
         vb.setYRange(y_min, y_max, padding=0)
         self._syncing = False
+        # 填充基线跟随绘图区底部（主线：铺到 plot_bottom，不是铺到 0）
+        if self.chk_fill.isChecked():
+            fill_level = y_min - 0.05 * max(y_max - y_min, 1e-9)
+            for curve in self._curves:
+                curve.setFillLevel(fill_level)
         self._sync_slider()
 
-    # ---------- 历史滑块 / 滚轮缩放（主线复刻） ----------
+    # ---------- 曲线填充 / 历史滑块 / 滚轮缩放 ----------
+
+    def _apply_fill_to_curve(self, curve, index: int):
+        """按开关与通道色应用/撤销线下浅填充（主线：同色 alpha=26/255）。"""
+        if self.chk_fill.isChecked():
+            color = pg.mkColor(CURVE_COLORS[index % len(CURVE_COLORS)])
+            brush = pg.mkBrush(color.red(), color.green(), color.blue(), 26)
+            curve.setBrush(brush)
+            curve._fill_brush = brush  # opts['brush'] 不存，挂属性供自省/测试
+        else:
+            curve.setBrush(None)
+            curve.setFillLevel(None)
+            curve._fill_brush = None
+
+    def _on_fill_toggled(self, on: bool):
+        write_setting('wave/fill_under', on)
+        for i, curve in enumerate(self._curves):
+            self._apply_fill_to_curve(curve, i)
+        self.repaint_wave()
 
     def _sync_slider(self):
         """按当前视图同步滑块位置：跟随=最右端，历史=窗口起点。"""

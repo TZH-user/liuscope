@@ -1218,6 +1218,18 @@ def test_wave_window():
     assert abs(wave.state.y_min - (y0 + 0.1 * (y1 - y0))) < 1e-6
     assert abs(wave.state.y_max - (y1 - 0.1 * (y1 - y0))) < 1e-6
 
+    # ---- 曲线填充开关（主线复刻：同色 alpha26 铺到绘图区底部） ----
+    assert wave.chk_fill.isChecked(), '默认开（主线口径）'
+    wave.repaint_wave()
+    c0 = wave._curves[0]
+    assert c0.opts.get('fillLevel') is not None, '填充基线跟随绘图区底部'
+    brush = c0._fill_brush
+    assert brush is not None and brush.color().alpha() == 26, '同色 alpha=26'
+    wave.chk_fill.setChecked(False)
+    assert wave._curves[0]._fill_brush is None
+    assert wave._curves[0].opts.get('fillLevel') is None
+    wave.chk_fill.setChecked(True)  # 还原默认
+
     win.close()
     print('WAVE WINDOW OK')
 
