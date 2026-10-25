@@ -74,6 +74,8 @@ class SpectrumPanel(QtWidgets.QWidget):
         self.chk_avg = QtWidgets.QCheckBox('平均')
         self.chk_wf = QtWidgets.QCheckBox('瀑布')
         self.chk_wf.setChecked(True)
+        self.chk_wf_flip = QtWidgets.QCheckBox('最新在底')
+        self.chk_wf_flip.setToolTip('不勾选=最新帧在顶部（主线口径）；勾选=最新帧在底部（新内容向下滚动）')
         self.chk_log = QtWidgets.QCheckBox('对数色标')
         self.btn_freeze = QtWidgets.QPushButton('冻结')
         self.btn_freeze.setObjectName('tool')
@@ -88,6 +90,7 @@ class SpectrumPanel(QtWidgets.QWidget):
         drow.addWidget(self.chk_peak)
         drow.addWidget(self.chk_avg)
         drow.addWidget(self.chk_wf)
+        drow.addWidget(self.chk_wf_flip)
         drow.addWidget(self.chk_log)
         drow.addWidget(self.btn_freeze)
         drow.addStretch(1)
@@ -135,6 +138,8 @@ class SpectrumPanel(QtWidgets.QWidget):
         layout.addLayout(prow)
         layout.addLayout(drow)
         layout.addWidget(self.plot, 3)
+        self.lbl_wf = QtWidgets.QLabel('瀑布图（最新在顶）')
+        layout.addWidget(self.lbl_wf)
         layout.addWidget(self.wf_plot, 1)
         layout.addWidget(self.lbl_peak)
         layout.addWidget(self.lbl_info)
@@ -273,12 +278,18 @@ class SpectrumPanel(QtWidgets.QWidget):
             self._waterfall.pop()
         if len(self._waterfall) < 2:
             return
-        # 列表 index 0 = 最新一行 → 图像顶部；旧行被顶向下方（与主线一致）
-        img = np.stack(self._waterfall)
+        # pyqtgraph ImageItem 数组第0轴=X(频率bin)、第1轴=Y(时间行)——必须转置！
+        # _waterfall[0]=最新；invertY(True) 视图下时间行0渲染在屏幕顶部，
+        # 因此默认转置后即"最新在顶"（主线口径）；勾"最新在底"则只翻时间轴。
+        img = np.ascontiguousarray(np.stack(self._waterfall).transpose(1, 0, 2))
+        if self.chk_wf_flip.isChecked():
+            img = np.ascontiguousarray(img[:, ::-1, :])
         self._wf_image.setImage(img, autoLevels=False)
         self._wf_image.setRect(QtCore.QRectF(0, 0, analysis['fs'] / 2.0, len(self._waterfall)))
         self.wf_plot.setXRange(0, analysis['fs'] / 2.0, padding=0)
         self.wf_plot.setYRange(0, len(self._waterfall), padding=0)
+        self.lbl_wf.setText('瀑布图（最新在底）' if self.chk_wf_flip.isChecked()
+                            else '瀑布图（最新在顶）')
 
     def _sync_channels(self):
         count = len(self.wave.ch_values)

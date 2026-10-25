@@ -1583,16 +1583,24 @@ def test_spectrum_panel():
     assert len(panel._waterfall) == rows_at_freeze, '冻结时瀑布不进新行'
     panel.btn_freeze.setChecked(False)
 
-    # 瀑布方向：新行在顶（图像第 0 行 == 最新一行，旧行被顶向下）
+    # 瀑布方向：默认最新在顶（主线口径）；勾"最新在底"则相反。
+    # yInverted 视图下 setImage 第0行落在屏幕底部 → 默认需翻转显示数组（末行=最新→顶）。
     panel.chk_wf.setChecked(True)
-    assert panel.wf_plot.getViewBox().state['yInverted'], 'y 轴必须反转：数据 row0(最新) 视觉在顶部（主线语义）'
+    panel.chk_wf_flip.setChecked(False)
+    assert panel.wf_plot.getViewBox().state['yInverted'], 'y 轴反转是方向映射的一半（另一半是显示数组翻转）'
     panel.repaint_spectrum()
-    top_row = panel._waterfall[0]
     panel.repaint_spectrum()  # 数据没变，但再推进一帧序列
     from core.dsp import waterfall_row as _wf_row
     scale = panel._read_scale()
     expected = _wf_row(panel.analyze()['db'], scale[2], scale[0], 1.0)
-    assert np.array_equal(panel._wf_image.image[0], expected), '图像顶部必须是最新谱行'
+    assert panel._wf_image.image.shape[0] == expected.shape[0], '转置后第0轴必须是频率bin'
+    assert np.array_equal(panel._wf_image.image[:, 0], expected), \
+        '默认(最新在顶)：时间第0行(渲染在顶)必须是最新谱行'
+    assert np.array_equal(panel._waterfall[0], expected), '数据层最新行仍是列表首元素'
+    panel.chk_wf_flip.setChecked(True)
+    panel.repaint_spectrum()
+    assert np.array_equal(panel._wf_image.image[:, -1], expected), \
+        '勾选最新在底：时间末行(渲染在底)必须是最新谱行'
 
     win.close()
     print('SPECTRUM PANEL OK')

@@ -128,8 +128,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log = QtWidgets.QTextEdit()
         self.log.setReadOnly(True)
         self.log.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
-        self.log.setToolTip('RX 日志：悬停任意行 0.4 秒自动 HEX⇄文本/十进制/float32 互转；'
-                            'Ctrl+F 查找与时间戳定位')
+        # 注意：这里不能再挂控件级静态 tooltip——Qt 会先弹它，抢掉逐行
+        # HEX⇄文本转换提示框（LogHoverTip，0.4s 延迟）。
         self._log_hover = LogHoverTip(self.log)
         self.find_bar = FindBar(self.log)
         self.find_bar.setVisible(False)
