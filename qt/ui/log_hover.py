@@ -62,17 +62,17 @@ class LogHoverTip(QtCore.QObject):
             self._timer.start()
         else:
             self._timer.stop()
-            QtGui.QToolTip.hideText()
+            QtWidgets.QToolTip.hideText()
 
     def _reset(self):
         self._last_block = -1
         self._tooltip = ''
         self._timer.stop()
-        QtGui.QToolTip.hideText()
+        QtWidgets.QToolTip.hideText()
 
     def _show_tooltip(self):
         if self._tooltip:
-            QtGui.QToolTip.showText(QtGui.QCursor.pos(), self._tooltip, self._log)
+            QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), self._tooltip, self._log)
 
 
 def tooltip_for_position(log: QtWidgets.QTextEdit, block_no: int) -> str:
