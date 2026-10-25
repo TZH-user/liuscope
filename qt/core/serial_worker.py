@@ -27,6 +27,14 @@ class SerialWorker(QtCore.QThread):
         self._running = True
         self._port = None
 
+    @property
+    def baud(self) -> int:
+        return self._baud
+
+    @property
+    def device(self) -> str:
+        return self._device
+
     def run(self):  # pragma: no cover - 需要真实串口，离屏自测不覆盖
         if serial is None:
             self.open_failed.emit('未安装 pyserial：python -m pip install pyserial')

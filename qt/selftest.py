@@ -721,6 +721,145 @@ def test_session_record():
     print('SESSION RECORD OK')
 
 
+def test_control_channel():
+    """C14：AI 控制通道——TCP JSON 行协议（ping/status/send/read_lines/协议/波形控制）。"""
+    import json
+    import time
+
+    from PySide6 import QtCore, QtWidgets
+
+    from PySide6.QtNetwork import QTcpSocket
+
+    from core.control_channel import ControlAPI, ControlChannel, handle_control_request
+    from core.wave_state import PROTOCOLS
+    from ui.main_window import MainWindow
+
+    # 纯协议层：假 api
+    calls = []
+
+    def fake_send(text, hex, newline):
+        calls.append(('send', text, hex, newline))
+        return {'ok': True}
+
+    api = ControlAPI(
+        status=lambda: {'connected': False, 'protocol': 'FireWater'},
+        list_ports=lambda: ['COM8 — USB-SERIAL CH340'],
+        send=fake_send,
+        read_lines=lambda count, filter: {'ok': True, 'lines': [{'t': 't', 'dir': 'RX',
+                                                                 'text': f'{count}|{filter}'}]},
+        wave_snapshot=lambda count: {'ok': True, 'count': count},
+        set_protocol=lambda p: {'ok': True, 'protocol': p},
+        wave_clear=lambda: {'ok': True},
+        wave_sim=lambda on: {'ok': True, 'sim_on': on},
+        record=lambda on: {'ok': True, 'recording': on},
+    )
+    r = handle_control_request('{"cmd":"ping"}', api)
+    assert r['ok'] and r['control'] == 'on'
+    r = handle_control_request('{bad json', api)
+    assert not r['ok'] and 'JSON 解析失败' in r['error']
+    r = handle_control_request('{"cmd":"nope"}', api)
+    assert '未知命令' in r['error']
+    r = handle_control_request('{"cmd":"send","text":"AT","hex":false,"newline":"LF"}', api)
+    assert r['ok'] and calls[-1] == ('send', 'AT', False, 'LF')
+    # 命令执行抛异常 → 错误响应不断链
+    def boom():
+        raise RuntimeError('串口未连接。')
+    broken = ControlAPI(status=boom, list_ports=boom, send=boom, read_lines=boom,
+                        wave_snapshot=boom, set_protocol=boom, wave_clear=boom,
+                        wave_sim=boom, record=boom)
+    r = handle_control_request('{"cmd":"status"}', broken)
+    assert not r['ok'] and r['error'] == '串口未连接。'
+
+    # TCP 壳：连上后连续多行请求 → 逐行响应（离屏无事件循环，用 processEvents 泵）
+    channel = ControlChannel(api, port=0)
+    assert channel.start()
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+
+    def pump_connect(sock, port):
+        sock.connectToHost('127.0.0.1', port)
+        deadline = time.time() + 3
+        while sock.state() != sock.SocketState.ConnectedState and time.time() < deadline:
+            app.processEvents()
+            sock.waitForConnected(20)
+        assert sock.state() == sock.SocketState.ConnectedState
+
+    def pump_lines(sock, want: int) -> bytes:
+        data = b''
+        deadline = time.time() + 3
+        while data.count(b'\n') < want and time.time() < deadline:
+            app.processEvents()
+            data += bytes(sock.readAll())
+            if data.count(b'\n') < want:
+                sock.waitForReadyRead(20)
+        return data
+
+    sock = QTcpSocket()
+    pump_connect(sock, channel.port)
+    requests = ('{"cmd":"ping"}\n'
+                '{"cmd":"list_ports"}\n'
+                '{"cmd":"read_lines","count":3,"filter":"err"}\n')
+    sock.write(requests.encode('utf-8'))
+    data = pump_lines(sock, 3)
+    sock.disconnectFromHost()
+    lines = [json.loads(x) for x in data.decode().strip().splitlines()]
+    assert lines[0]['ok'] and lines[1]['ports'] == ['COM8 — USB-SERIAL CH340']
+    assert lines[2]['lines'][0]['text'] == '3|err'
+    channel.stop()
+
+    # 主窗体集成：菜单开关 + 真实 api
+    win = MainWindow()
+    win.show()
+    win.wave.state.enabled = True
+    win.combo_rx_format.setCurrentText('ASCII')
+    win._control_channel._port = 0  # 测试用临时端口（9101 可能被本机其他进程占用）
+    win.act_control.setChecked(True)  # toggled → start + SYS 公告
+    assert win._control_channel.listening
+    assert 'AI 控制通道已开启' in win.log.toPlainText()
+
+    sock2 = QTcpSocket()
+    pump_connect(sock2, win._control_channel.port)
+
+    def rpc(request: dict) -> dict:
+        sock2.write((json.dumps(request, ensure_ascii=False) + '\n').encode('utf-8'))
+        line = pump_lines(sock2, 1).split(b'\n')[0]
+        return json.loads(line)
+
+    status = rpc({'cmd': 'status'})
+    assert status['ok'] and status['connected'] is False and status['protocol'] == 'FireWater'
+    # 发送未连接 → 错误响应不断链
+    r = rpc({'cmd': 'send', 'text': 'AT'})
+    assert not r['ok'] and '未连接' in r['error']
+    # 波形控制真动作
+    assert rpc({'cmd': 'wave_sim', 'on': True})['ok']
+    assert win.wave.btn_sim.isChecked()
+    assert rpc({'cmd': 'set_protocol', 'protocol': 'JustFloat'})['ok']
+    assert win.wave.state.protocol == 'JustFloat'
+    assert rpc({'cmd': 'set_protocol', 'protocol': 'Bad'})['ok'] is False
+    # 关 sim（防模拟帧串扰）、切回 FireWater、清缓冲后灌两帧
+    assert rpc({'cmd': 'wave_sim', 'on': False})['ok']
+    assert not win.wave.btn_sim.isChecked()
+    assert rpc({'cmd': 'set_protocol', 'protocol': 'FireWater'})['ok']
+    win.wave.state.reset_buffers()
+    win.wave.state.consume_bytes(b'1,2\n2,4\n')
+    snap = rpc({'cmd': 'wave_snapshot', 'count': 2})
+    assert snap['count'] == 2 and len(snap['channels']) == 2
+    win.ingest_bytes(b'ctrl-line\n')
+    lines = rpc({'cmd': 'read_lines', 'count': 5, 'filter': 'ctrl-line'})['lines']
+    assert any('ctrl-line' in l['text'] for l in lines)
+    assert rpc({'cmd': 'record', 'on': True})['recording'] is True
+    assert rpc({'cmd': 'record', 'on': False})['recording'] is False
+    assert rpc({'cmd': 'wave_clear'})['ok']
+    assert win.wave.state.frame_count == 0
+
+    win.act_control.setChecked(False)
+    assert not win._control_channel.listening
+    sock2.close()
+    win.wave.btn_sim.setChecked(False)
+    win._port_watch_timer.stop()
+    win.close()
+    print('CONTROL CHANNEL OK')
+
+
 def test_wave_protocols():
     """三协议解码 + 视图模型 + 滤波 + 快照合同（对齐主线 SelfTest 断言口径）。"""
     import struct
@@ -1314,6 +1453,7 @@ def run_selftest() -> int:
     test_wave_presets()
     test_xy_view()
     test_session_record()
+    test_control_channel()
     test_wave_protocols()
     test_wave_window()
     test_main_window_m3()

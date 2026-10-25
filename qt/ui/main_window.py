@@ -18,6 +18,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from core import APP_NAME, APP_VERSION, REPO_URL
 from core.auto_log import AutoLogWriter, build_log_export_text, format_entry_block, get_log_dir
+from core.control_channel import ControlAPI, ControlChannel, handle_control_request
 from core.fault_decode import test_fault_dump_line
 from core.hexutil import bytes_to_hex_text, try_parse_hex_text
 from core.ports import (port_display_text, port_name_from_display,
@@ -249,6 +250,15 @@ class MainWindow(QtWidgets.QMainWindow):
         act_about = QtGui.QAction('关于', self)
         act_about.triggered.connect(self._show_about)
         menu_help.addAction(act_about)
+        # AI 控制通道（TCP JSON 行协议，默认 127.0.0.1:9101）
+        self._control_api = self._build_control_api()
+        self._control_channel = ControlChannel(self._control_api, parent=self)
+        self.act_control = QtGui.QAction('AI 控制通道 (127.0.0.1:9101)', self)
+        self.act_control.setCheckable(True)
+        self.act_control.setToolTip('开启后 AI/脚本可通过 TCP JSON 行协议控制本工具：'
+                                    'ping/status/send/read_lines/wave_snapshot/…')
+        self.act_control.toggled.connect(self._on_control_toggled)
+        menu_help.addAction(self.act_control)
         self._update_check_fn = check_app_update  # 测试可注入替换
 
         # 启动更新检查：24h 节流（对齐主线），延迟 3s 等界面稳定
@@ -333,6 +343,112 @@ class MainWindow(QtWidgets.QMainWindow):
             self, '选择会话录制文件', get_log_dir(), '会话录制 (*.jsonl);;所有文件 (*.*)')
         if path:
             self._start_replay(path)
+
+    # ---------- AI 控制通道 ----------
+
+    def _build_control_api(self) -> ControlAPI:
+        """把主窗体能力包成控制通道可调用集（对齐主线 handle_control_request 的宿主面）。"""
+        import re as _re
+
+        from core.ports import port_display_text, scan_port_infos
+        from core.wave_state import PROTOCOLS
+
+        def status() -> dict:
+            return {
+                'connected': bool(self.worker),
+                'port': self._connected_device,
+                'baud': (self.worker.baud if self.worker else 0),
+                'protocol': self.wave.state.protocol,
+                'frame_total': self.wave.state.frame_total,
+                'frame_count': self.wave.state.frame_count,
+                'channels': len(self.wave.state.ch_values),
+                'rx_entries': len(self.message_entries),
+                'recording': self.recorder.active,
+                'sim_on': self.wave.btn_sim.isChecked(),
+            }
+
+        def list_ports() -> list:
+            return [port_display_text(d, desc) for d, desc in scan_port_infos()]
+
+        def send(text: str, hex: bool, newline: str) -> dict:  # noqa: A002 (协议字段名)
+            if not self.worker:
+                raise RuntimeError('串口未连接。')
+            if hex:
+                payload = try_parse_hex_text(text) + NEWLINE_BYTES.get(newline, b'')
+                if not payload:
+                    raise ValueError('HEX 输入无效')
+                display = bytes_to_hex_text(payload)
+            else:
+                payload = (text + NEWLINE_TEXT.get(newline, '')).encode('utf-8')
+                if not payload:
+                    raise ValueError('空内容')
+                display = text + NEWLINE_TEXT.get(newline, '')
+            if not self.worker.write_bytes(payload):
+                raise RuntimeError('串口写入失败。')
+            self._count_tx_bytes(len(payload))
+            self._append_log('TX', display.replace('\r', '<CR>').replace('\n', '<LF>'))
+            return {'ok': True}
+
+        def read_lines(count: int, filter: str) -> dict:  # noqa: A002 (协议字段名)
+            regex = _re.compile(filter) if filter else None
+            start = max(0, len(self.message_entries) - count)
+            lines = []
+            for entry in self.message_entries[start:]:
+                if regex is not None and not regex.search(entry['text']):
+                    continue
+                lines.append({
+                    't': entry['ts'].strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
+                    'dir': entry['direction'],
+                    'text': entry['text'],
+                })
+            return {'ok': True, 'lines': lines}
+
+        def wave_snapshot(count: int) -> dict:
+            st = self.wave.state
+            take = min(max(1, count), st.frame_count)
+            channels = [{'name': st.channel_display_name(c),
+                         'values': list(st.snapshot(c, take))}
+                        for c in range(len(st.ch_values))]
+            return {'ok': True, 'protocol': st.protocol, 'frame_total': st.frame_total,
+                    'count': take, 'channels': channels}
+
+        def set_protocol(protocol: str) -> dict:
+            if protocol not in PROTOCOLS:
+                return {'ok': False, 'error': 'protocol 必须是 FireWater/JustFloat/RawData'}
+            self.wave.combo_protocol.setCurrentText(protocol)
+            return {'ok': True, 'protocol': self.wave.state.protocol}
+
+        def wave_clear() -> dict:
+            self.wave.clear_buffers()
+            return {'ok': True}
+
+        def wave_sim(on: bool) -> dict:
+            self.wave.btn_sim.setChecked(on)
+            return {'ok': True, 'sim_on': self.wave.btn_sim.isChecked()}
+
+        def record(on: bool) -> dict:
+            self.toggle_session_record(on)
+            return {'ok': True, 'recording': self.recorder.active,
+                    'file': self.recorder.path}
+
+        return ControlAPI(status=status, list_ports=list_ports, send=send,
+                          read_lines=read_lines, wave_snapshot=wave_snapshot,
+                          set_protocol=set_protocol, wave_clear=wave_clear,
+                          wave_sim=wave_sim, record=record)
+
+    def _on_control_toggled(self, on: bool):
+        if on:
+            if self._control_channel.start():
+                self._append_log('SYS',
+                                 f'AI 控制通道已开启: tcp://127.0.0.1:{self._control_channel.port}'
+                                 '（JSON 行协议: ping/status/send/read_lines/wave_snapshot/'
+                                 'set_protocol/wave_clear/wave_sim/record/list_ports）')
+            else:
+                self._append_log('SYS', 'AI 控制通道启动失败（端口可能被占用）')
+                self.act_control.setChecked(False)
+        else:
+            self._control_channel.stop()
+            self._append_log('SYS', 'AI 控制通道已关闭。')
 
     def _show_about(self):
         QtWidgets.QMessageBox.about(
@@ -462,6 +578,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._port_watch_timer.stop()
         self._auto_log.close()
         self.recorder.stop()
+        self._control_channel.stop()
         self.wave.stop_timers()
         self.spectrum.stop_timers()
         self._stop_file_send('窗口关闭')
