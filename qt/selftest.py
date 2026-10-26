@@ -1691,6 +1691,19 @@ def test_spectrum_panel():
 
 # ===================== 集成收口阶段新增组（自 _verify/*.py 有价值验证并入） =====================
 
+def _pump_until(app, cond, timeout_s=6.0):
+    """事件循环轮询直到 cond 成立（替代固定 sleep；超时返回最终真假）。"""
+    import time
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        app.processEvents()
+        if cond():
+            return True
+        time.sleep(0.005)
+    app.processEvents()
+    return bool(cond())
+
+
 def _fake_worker_cls():
     """替身串口线程类（信号面同 SerialWorker；start() 同步发 opened）。"""
     from PySide6 import QtCore
@@ -2440,15 +2453,7 @@ def test_ai_channel_extended():
         assert win._control_channel.start()
     sock = QTcpSocket()
 
-    def pump_until(cond, timeout_s=6.0):
-        deadline = time.time() + timeout_s
-        while time.time() < deadline:
-            app.processEvents()
-            if cond():
-                return True
-            time.sleep(0.005)
-        app.processEvents()
-        return bool(cond())
+    pump_until = lambda cond, timeout_s=6.0: _pump_until(app, cond, timeout_s)
 
     def rpc(request):
         sock.write((json.dumps(request, ensure_ascii=False) + '\n').encode('utf-8'))
@@ -2915,6 +2920,45 @@ def test_main_tabs_integration():
     print('MAIN TABS INTEGRATION OK')
 
 
+def test_net_serial_url():
+    """v2 M1①：网络串口 URL 直通——serial_for_url 全链（loop:// 回环）+ 可编辑端口下拉。
+
+    不需要硬件：loop:// 是 pyserial 内建回环 URL，写进去的字节立刻回读。
+    验证：下拉可手输 URL → 连接成功 → UI 发送经 URL 端口回显进 RX 日志 → 断开干净。
+    """
+    from PySide6 import QtWidgets
+
+    import ui.main_window as mw
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    saved = _snapshot_settings(_CONNECT_KEYS)
+    win = mw.MainWindow()
+    win.show()
+    win._port_watch_timer.stop()
+    received = []
+    try:
+        assert win.combo_port.isEditable(), '端口下拉应可编辑（网络串口 URL 直输）'
+        win.combo_port.setCurrentText('loop://')
+        win.combo_baud.setCurrentText('115200')
+        win.btn_connect.click()
+        assert _pump_until(app, lambda: win.worker is not None
+                              and win._connected_device == 'loop://'), 'URL 直连应成功'
+        win.worker.got_bytes.connect(received.append)
+        win.edit_send.setText('HELLO-URL')
+        win.send()
+        assert _pump_until(app, lambda: any(b'HELLO-URL' in chunk for chunk in received)), \
+            f'loop:// 应回显发送内容，实际收到 {received!r}'
+        assert win.rx_bytes_total >= len('HELLO-URL\n'), 'RX 统计应累计回环字节'
+        btn = win.btn_connect
+        btn.click()
+        assert _pump_until(app, lambda: win.worker is None), '断开应干净'
+    finally:
+        win._port_watch_timer.stop()
+        win.close()
+        _restore_settings(saved)  # closeEvent 会回写 connect/*，这里还原
+    print('NET SERIAL URL OK')
+
+
 def run_selftest() -> int:
     import os
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -2953,6 +2997,7 @@ def run_selftest() -> int:
     test_ai_channel_extended()
     test_stm32_fake_cli()
     test_main_tabs_integration()
+    test_net_serial_url()
     print('QT_SPIKE_SELFTEST_OK')
     return 0
 

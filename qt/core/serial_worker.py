@@ -40,7 +40,9 @@ class SerialWorker(QtCore.QThread):
             self.open_failed.emit('未安装 pyserial：python -m pip install pyserial')
             return
         try:
-            self._port = serial.Serial(self._device, self._baud, timeout=0)
+            # serial_for_url：裸 COM 名走默认本地端口；rfc2217://、socket://、loop://
+            # 等 pyserial URL 直通（v2 M1 串口网络化：ser2net / Moxa NPort / 远程板卡）
+            self._port = serial.serial_for_url(self._device, self._baud, timeout=0)
         except Exception as exc:
             self.open_failed.emit(str(exc))
             return

@@ -131,6 +131,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # ---- 顶部连接行 ----
         self.combo_port = QtWidgets.QComboBox()
+        self.combo_port.setEditable(True)          # v2 M1：可手输 pyserial URL（rfc2217:// 等）
+        self.combo_port.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        self.combo_port.setToolTip(
+            '本地串口从列表选择；网络串口直接手输 pyserial URL 后连接，如\n'
+            'rfc2217://192.168.1.50:7000（板端 ser2net，RFC2217 波特率由板端协商）\n'
+            'socket://192.168.1.50:7001（TCP 裸透传）')
         self.combo_baud = QtWidgets.QComboBox()
         self.combo_baud.setEditable(True)
         self.combo_baud.addItems(['1500000', '921600', '460800', '115200'])
@@ -671,8 +677,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 text = str(value).strip()
                 idx = self.combo_port.findText(text, QtCore.Qt.MatchStartsWith)
                 if idx < 0:
-                    return {'ok': False,
-                            'error': f'没有串口匹配 {text!r}（可先 list_ports 查看）'}
+                    if '://' not in text:
+                        return {'ok': False,
+                                'error': f'没有串口匹配 {text!r}（可先 list_ports 查看）'}
+                    # 网络串口 URL（rfc2217://、socket://…）：不进扫描列表，直接接受
+                    text_before = self.combo_port.currentText()
+                    self.combo_port.setCurrentText(text)
+                    return {'ok': True, 'key': 'port', 'before': text_before,
+                            'after': self.combo_port.currentText()}
                 before = self.combo_port.currentText()
                 self.combo_port.setCurrentIndex(idx)
                 return {'ok': True, 'key': 'port', 'before': before,
@@ -793,6 +805,9 @@ class MainWindow(QtWidgets.QMainWindow):
             idx = self.combo_port.findText(keep, QtCore.Qt.MatchStartsWith)
             if idx >= 0:
                 self.combo_port.setCurrentIndex(idx)
+            elif '://' in keep:
+                # 手输的网络串口 URL 不在扫描列表里，刷新后保持（v2 M1）
+                self.combo_port.setCurrentText(keep)
 
     def start_port_watch(self):
         """首扫建基线（已插着的设备不触发自动连接）→ 启动 2s 热插拔轮询。"""
