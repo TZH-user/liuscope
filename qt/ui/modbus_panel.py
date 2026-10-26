@@ -15,13 +15,20 @@ from core.hexutil import bytes_to_hex_text
 from core.modbus import (WatchItem, build_modbus_request, decode_modbus_registers,
                          merge_watch_groups, parse_modbus_response,
                          slice_watch_value, watch_flash_tone)
+from ui import theme
 
 FC_ITEMS = ('01 读线圈', '02 读离散输入', '03 读保持寄存器', '04 读输入寄存器',
             '05 写单线圈', '06 写单寄存器', '15 写多线圈', '16 写多寄存器')
 FC_MAP = (1, 2, 3, 4, 5, 6, 15, 16)
 DECODE_ITEMS = ('十进制', 'HEX', '有符号', 'float32(ABCD)', 'float32(CDAB)')
 
-FLASH_COLORS = {'up': '#80DC80', 'down': '#EB766C', 'changed': '#E8C66E'}
+FLASH_COLORS = {'up': '#80DC80', 'down': '#EB766C', 'changed': '#E8C66E'}  # 深色基准保留
+
+
+def flash_color(tone: str) -> str:
+    """闪烁高亮色随主题（浅色底上亮色高亮对比不足，配色键在 theme.py）。"""
+    return theme.color({'up': 'flash_up', 'down': 'flash_down',
+                        'changed': 'flash_changed'}[tone])
 
 
 def _stamp_ms() -> str:
@@ -234,7 +241,7 @@ class ModbusPanel(QtWidgets.QWidget):
         row = self.watch_items.index(item)
         self._fill_watch_row(row)
         if tone != 'same':
-            self._flash_cell(row, 4, FLASH_COLORS[tone])
+            self._flash_cell(row, 4, flash_color(tone))
 
     def _fill_watch_row(self, row: int):
         item = self.watch_items[row]
@@ -256,7 +263,8 @@ class ModbusPanel(QtWidgets.QWidget):
         timer.setInterval(700)
 
         def restore():
-            cell.setForeground(QtGui.QColor('#E1E6F0'))
+            # 回落主文本色随主题（旧硬编码深色 #E1E6F0 在浅色白底表格上不可见）
+            cell.setForeground(QtGui.QColor(theme.color('text')))
             self._flash_timers.pop(key, None)
 
         timer.timeout.connect(restore)

@@ -603,9 +603,16 @@ class MainWindow(QtWidgets.QMainWindow):
             fn = getattr(panel, 'ai_status', None)  # 页面未来可提供更丰富的状态口
             if callable(fn):
                 try:
-                    return {'ok': True, 'available': True, **(fn() or {})}
+                    snap = dict(fn() or {})
                 except Exception as exc:
                     return {'ok': False, 'error': f'STM32 页状态读取失败: {exc}'}
+                if not snap.get('cli_found', False):
+                    note = '未找到 STM32CubeProgrammer CLI（设置页配置路径后重试）'
+                elif not snap.get('connected', False):
+                    note = 'CLI 就绪，尚未连接目标（STM32 页「连接目标」后可用）'
+                else:
+                    note = '已连接目标（连接状态与 STM32 页一致）'
+                return {'ok': True, 'available': True, 'note': note, **snap}
             return {'ok': True, 'available': True,
                     'connected': bool(getattr(panel, 'connected', False)),
                     'busy': bool(getattr(panel, 'busy', False)),
@@ -695,7 +702,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 except ValueError:
                     return {'ok': False, 'error': f'显示点数必须是整数: {value!r}'}
                 before = self.wave.combo_window.currentText()
-                self.wave.combo_window.setCurrentText(str(n))  # → state.set_view_width 钳制
+                # 文档口径：钳制 50..200000（与 wave_state.MIN/MAX_WINDOW 同源）
+                n = max(self.wave.state.MIN_WINDOW, min(n, self.wave.state.MAX_WINDOW))
+                self.wave.combo_window.setCurrentText(str(n))  # → state.set_view_width
                 return {'ok': True, 'key': 'points', 'before': before,
                         'after': self.wave.combo_window.currentText()}
             if k == 'fill':

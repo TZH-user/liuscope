@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- LiuScope（柳镜）图标：横枝垂柳，水线为示波轨迹，水下柳影即"镜" -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1177BB"/>
+      <stop offset="1" stop-color="#0A4E7E"/>
+    </linearGradient>
+    <clipPath id="round"><rect x="8" y="8" width="240" height="240" rx="52"/></clipPath>
+    <clipPath id="water"><rect x="8" y="192" width="240" height="56"/></clipPath>
+  </defs>
+  <g clip-path="url(#round)">
+    <rect x="8" y="8" width="240" height="240" fill="url(#bg)"/>
+    <!-- 横枝 -->
+    <path d="M6 44 C 66 30, 186 30, 250 48" fill="none" stroke="#A8D4F2"
+          stroke-width="10" stroke-linecap="round" opacity="0.9"/>
+    <!-- 垂柳丝 -->
+    <g fill="none" stroke="#DCEFFF" stroke-linecap="round">
+      <path d="M44 40 C 40 74, 34 106, 22 134" stroke-width="4.5" opacity="0.9"/>
+      <path d="M78 36 C 78 76, 70 116, 54 152" stroke-width="5" opacity="0.8"/>
+      <path d="M114 34 C 116 78, 110 120, 96 158" stroke-width="5.5" opacity="0.95"/>
+      <path d="M150 33 C 154 74, 150 114, 138 148" stroke-width="5" opacity="0.8"/>
+      <path d="M186 35 C 192 70, 190 104, 180 136" stroke-width="4.5" opacity="0.9"/>
+      <path d="M220 40 C 226 68, 226 96, 218 122" stroke-width="4" opacity="0.7"/>
+    </g>
+    <!-- 柳叶：顺下垂方向的小叶刺 -->
+    <g fill="none" stroke="#BFE2FF" stroke-width="3.5" stroke-linecap="round" opacity="0.65">
+      <path d="M60 52 q -10 12 -24 18"/>
+      <path d="M96 76 q 11 11 26 14"/>
+      <path d="M128 60 q -9 13 -22 20"/>
+      <path d="M160 68 q 11 10 26 12"/>
+      <path d="M196 52 q -7 12 -18 18"/>
+    </g>
+    <!-- 镜：柳丝在水下的倒影 -->
+    <g clip-path="url(#water)" fill="none" stroke="#9CCBEE" stroke-linecap="round" opacity="0.2"
+       transform="translate(0,384) scale(1,-1)">
+      <path d="M78 36 C 78 76, 70 116, 54 152" stroke-width="5"/>
+      <path d="M114 34 C 116 78, 110 120, 96 158" stroke-width="5.5"/>
+      <path d="M150 33 C 154 74, 150 114, 138 148" stroke-width="5"/>
+    </g>
+    <!-- 水线即示波器轨迹 -->
+    <path d="M26 192 Q 44 166, 62 192 T 98 192 T 134 192 T 170 192 T 206 192 T 234 192"
+          fill="none" stroke="#7DD8FF" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="8" y="8" width="240" height="240" rx="52" fill="none" stroke="#FFFFFF" stroke-opacity="0.07" stroke-width="2"/>
+  </g>
+</svg>

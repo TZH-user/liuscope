@@ -1,7 +1,8 @@
-# 交接说明 — LiuScope（柳镜）v1.2.0
+# 交接说明 — LiuScope（柳镜）v1.2.1
 
 **日期：** 2026-10-27
-**版本：** master @ v1.2.0（软件已由 serialscope 改名 **LiuScope**，中文别名「柳镜」，作者 折柳）
+**版本：** master @ v1.2.1（未发布：exe 已重打，release/tag 待确认后发）
+**用户请看：** [docs/用户手册_v1.2.md](docs/用户手册_v1.2.md) ｜ **版本历史：** [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
@@ -9,36 +10,42 @@
 
 | 指标 | 状态 |
 |---|---|
-| master 分支 | ✅ 仅 Qt 主线（PS 存档整体移至 `ps-legacy` 分支，封版 v1.0.0） |
+| master 分支 | ✅ 仅 Qt 主线（PS 存档整体在 `ps-legacy` 分支，封版 v1.0.0） |
 | 仓库 | `github.com/TZH-user/liuscope`（旧 serialscope 链接自动重定向） |
-| selftest | ✅ 33 组全绿（含 v1.2.0 新增 9 组） |
-| release | ✅ v1.2.0 已发布，挂 `liuscope.exe`（~99 MB） |
-| CI | ✅ GitHub Actions：push/PR 跑 `python qt/selftest.py`；`v*` tag 追加打包 exe |
-| qt-frontend-spike 分支 | 已删除（全部合入） |
+| selftest | ✅ 34 组全绿（v1.2.1 新增 THEME CONTRAST 组 + points 钳制/stm32 note 断言） |
+| 真机台架回归 | ✅ 压测 16/16（内存阈值按 v1.2.1 校准为 190MB，导出历史缓冲 ~80MB 为设计内有界）+ 交互 29/29 + 浸泡 9/9 |
+| AI 通道 E2E | ✅ 19 题 100 分真机真 socket 实测 **97.5/100**（出题/做题双代理隔离，报告 `_verify/ai_exam_report.md`） |
+| 对比度审计 | ✅ 394 项 0 违规（两主题 × 7 页签，`_verify/theme_contrast_audit.py`） |
+| release | v1.2.0 已发布；**v1.2.1 已就绪未发布**（等确认后打 tag，CI 自动打包） |
+| CI | ✅ selftest + tag 打包 exe（含图标）+ `SHA256SUMS.txt` |
 
-## v1.2.0 改动清单
+## v1.2.1 改动清单
 
-- **终端页**：连接按钮状态化（断开/连接在手动/热插拔/连接丢失/程序断开全路径同步）；TX 行聊天式右对齐（保持 QPlainTextEdit + maximumBlockCount 内存修复）；悬停互转核对补齐（HEX 行显 ASCII，文本行显 HEX）
-- **波形页**：「窗口」→「显示点数」；曲线填充迁至设置页；CH 复选框高对比边框；右键菜单全中文（恢复自动缩放/导出PNG/导出CSV/显示网格）；导出 PNG+CSV 菜单；XY 参数补齐（每窗 X/Y 源通道、量程固定±N/自适应、窗口数 1/2/4、分格、点/线、余晖档位）；悬停十字读数（首行 x，逐曲线「名: y」）
-- **频谱页**：谱图与瀑布 x 轴联动对齐（同频点垂直对齐）；导出 PNG（标注采样率/FFT/窗/RBW/峰值保持/时间范围）与 CSV（最新一帧 / 最近 N 秒，N 钳制到实际采集时长）；清空功能；采集时长追踪
-- **设置页（新增）**：主题深色/浅色即时切换并记忆；曲线填充迁移；STM32CubeProgrammer CLI 路径
-- **关于页（新增）**：品牌 LiuScope / 柳镜、版本、作者 折柳、GPL-3.0、仓库链接
-- **AI 控制通道规范化**：help 全命令表；read_lines count/follow（最新 N 行 / 连续输出）；spectrum_snapshot / xy_snapshot / modbus_recent / stm32_status / settings_list；settings_set（波特率/协议/主题/显示点数/曲线填充…）控制后 UI 同步；AI_INTERFACE.md 全量重写
-- **STM32 页（新增）**：基于 STM32CubeProgrammer CLI——ST-LINK 探测、目标连接与芯片信息、硬/软复位、hex/bin 烧录（带校验）、全片擦除、读保护解除、OB 读取，全异步不卡 UI
-- **改名**：serialscope → LiuScope（窗口标题/关于页/README/update_check URL/AI 文档）；README 截图全部换成 Qt 版
+- **应用图标**：「垂柳 × 示波水线」（`qt/assets/liuscope_icon.svg` 源 + 多尺寸 ico；窗口/任务栏/exe/README 全接入；`make_icon.py` 可再生）
+- **浅色主题修复**（用户报告"灰底白字"）：#tool 小按钮统一蓝底白字（#0E639C，对比 6.4）；禁用按钮弱化蓝灰底白字；Modbus 闪烁/频谱警告/波形读数首行等硬编码深色值全部随主题
+- **E2E 修复**：暗色下单选钮不渲染（QRadioButton QSS，导出口径对话框受益）；`settings_set points` 越界钳制 50..200000；`stm32_status` 补 `note` 字段；「恢复自动缩放」还原被历史滑块拖窄的横向宽度
+- **文档**：AI_INTERFACE §3 导出措辞更正 + paused 语义澄清；用户手册补快速上手/配置卸载/故障排查 FAQ
+- **工程**：CI 产出 SHA256SUMS.txt；CHANGELOG.md 建立；实验区台架内存阈值校准 + 固件已知问题记录
 
 ## 目录结构
 
 ```
 liuscope/
-  qt/                      ★ Qt 主线（v1.2.0）
+  qt/                      ★ Qt 主线（v1.2.1）
     core/                  纯逻辑（settings / control_channel / stm32_cli / dsp / …）
     ui/                    分层窗体（main_window / wave_window / spectrum_panel / settings_page / stm32_panel / theme）
-    selftest.py            离屏自测（33 组）
+    assets/                图标（svg 源 + ico + make_icon.py）
+    selftest.py            离屏自测（34 组）
     headless_main.py       无头管线
-  docs/screenshots/        Qt 版截图（README 引用）
+  docs/
+    screenshots/           Qt 版截图（深浅两套）
+    research/              调研：测试交接最佳实践 / 低延迟投屏选型
+    设计_Linux设备互联_v2.md 下一版设计（鲁班猫投屏+交互+串口网络化）
+    用户手册_v1.2.md        用户视角手册
+  _verify/                 验收资产（对比度审计/浅色截图脚本/AI 考卷与报告）
   .github/workflows/ci.yml CI（selftest + tag 打包）
   AI_INTERFACE.md          AI 控制通道接口（TCP 9101 JSON 行协议）
+  CHANGELOG.md             版本变更日志（SemVer + Keep a Changelog）
   HANDOFF.md               本文件
 ```
 
@@ -47,20 +54,23 @@ liuscope/
 ```powershell
 pip install PySide6 pyqtgraph numpy pyserial
 python qt/main.py                      # 源码运行
-python qt/selftest.py                  # 离屏自测（33 组）
-python -m PyInstaller --noconfirm --onefile --windowed --paths qt --name liuscope qt/main.py
-# 产物 dist/liuscope.exe（~99 MB）
+python qt/selftest.py                  # 离屏自测（34 组）
+python _verify/theme_contrast_audit.py # 对比度审计（394 项）
+python -m PyInstaller --noconfirm --onefile --windowed --paths qt --name liuscope `
+  --icon qt/assets/liuscope.ico --add-data "qt/assets;assets" qt/main.py
+# 产物 dist/liuscope.exe（~99 MB，图标已嵌入）
 ```
 
 ## 已知限制 / 待办
 
-- **真机回归待跑**：`F:\软件仓库_新\开发软件\串口调试助手实验区\h743xih6\`（qt_stress / qt_soak / qt_interact，需 COM9）
-- AI 控制通道真 socket 端到端实测待做（selftest 已覆盖命令分发与 UI 同步）
-- CubeProgrammer CLI `-l` 输出的 Description 字段在中文控制台显示 `?`（CLI 自身对管道输出码页所致，非解码 bug；`decode_output` 已有 UTF-8→GBK 兜底）
+- **固件侧**（实验区固件，未修，已记入实验区 README_TESTING.md）：B-01 MODE 5 对 addr0+count1 读帧不应答；B-02 MODE 6 满速流不响应文本 `MENU`（只能 `KEY 1` 退出）
+- **记录级**（低优先）：波形页暂停语义=只冻结波形页显示，频谱管线继续（已在 AI_INTERFACE §1.4 写明）；Q19 滑块拖拽中出现一次不可复现的导出弹窗（未落地）
+- **v1.3 backlog**（来自交接调研清单）：pytest-qt 断言型 UI 回归套件；CI 对 exe 跑 offscreen 冒烟（`--selftest-exit`）；prerelease beta 渠道流程；Release notes 三段式模板
+- CubeProgrammer CLI `-l` 输出 Description 字段在中文控制台显示 `?`（CLI 自身码页所致，非解码 bug）
 - 频谱「最近 N 秒」导出受历史容量上限（6000 帧 / 2000 万单元格，32k 点约 1 分钟跨度）
-- 旧 AI 消费方注意：响应 `tool` 字段已由 `serialscope` 变为 `LiuScope`
-- 浅色主题为 v1.2.0 新增，个别第三方控件配色可能在极端场景下对比度欠佳，发现问题报 issue
+- 下一版方向：Linux/鲁班猫设备互联（投屏+交互+串口网络化），设计与调研见 `docs/`，开工分支 `v2-linux-link`
 
 ## 台架测试区
 
 位置：`F:\软件仓库_新\开发软件\串口调试助手实验区\h743xih6\`（README_TESTING.md / qt_stress.py / qt_soak.py / qt_interact.py / shots/ / logs/）
+2026-10-27 回归基线：压测 16/16（RSS 阈值 190MB，含 v1.2 导出历史 ~80MB 设计内缓冲）、交互 29/29（连上后主动发 `MENU` 再断言横幅，不依赖板子开机状态）、浸泡 9/9（ADC 1001 行/s、FFT 三峰 50/120/300Hz 命中）。

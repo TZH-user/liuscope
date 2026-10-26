@@ -37,9 +37,17 @@ jobs:
       - name: 安装依赖
         run: pip install PySide6 pyqtgraph numpy pyserial pyinstaller
       - name: PyInstaller 单文件打包
-        run: python -m PyInstaller --noconfirm --onefile --windowed --paths qt --name liuscope qt/main.py
+        run: python -m PyInstaller --noconfirm --onefile --windowed --paths qt --name liuscope --icon qt/assets/liuscope.ico --add-data "qt/assets;assets" qt/main.py
+      - name: 生成 SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash dist/liuscope.exe -Algorithm SHA256).Hash.ToLower()
+          "$h  liuscope.exe" | Out-File -Encoding ascii dist/SHA256SUMS.txt
+          Get-Content dist/SHA256SUMS.txt
       - name: 上传 exe
         uses: actions/upload-artifact@v4
         with:
           name: liuscope-exe
-          path: dist/liuscope.exe
+          path: |
+            dist/liuscope.exe
+            dist/SHA256SUMS.txt

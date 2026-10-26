@@ -85,7 +85,7 @@ GUI 启动自动监听 `tcp://127.0.0.1:9101`。协议：TCP 连接后每发一�
 | `theme` | str | `dark`/`light`（深色/浅色）；改后全页即时换肤并写设置记忆 |
 | `points` | int | 显示点数（绘图区横向点数，钳制 50..200000）；改后波形页「显示点数」下拉跟随 |
 | `fill` | bool | 曲线填充开关；改后设置页复选框、波形页填充与设置键 `wave/fill_under` 三者一致 |
-| `paused` | bool | true=暂停 false=恢复；改后波形页「暂停/继续」按钮与解析状态一致（RX 显示不受影响） |
+| `paused` | bool | true=暂停 false=恢复；改后波形页「暂停/继续」按钮与解析状态一致（RX 显示不受影响）。注意：paused 只冻结**波形页**显示，频谱管线继续由频谱页自身「冻结」按钮单独控制（响应里的 `frozen` 字段即指频谱冻结按钮状态） |
 
 响应统一为 `{"ok":true,"key":"…","before":…,"after":…}`（含改前/改后值）。设置键有中英文别名（如 `波特率`→`baud`、`显示点数`→`points`、`曲线填充`→`fill`、`暂停`→`paused`）。全部走主窗统一 apply 入口，下拉/复选框等 UI 控件与内部状态一致。
 
@@ -234,7 +234,7 @@ GUI 录制（或 `--record`）产生的 JSONL（`DATA` 行含 base64 字节流�
 
 1. **刷机/烧录验证闭环**：`--flash-command ... --error-regex "panic|HardFault" --expect-file expect.json` → 看退出码 + SUMMARY 行。
 2. **偶发故障抓现场**：常开 GUI + 控制通道，AI 用 `read_lines`（可 `follow` 持续盯屏 + `filter` 正则）取上下文；`modbus_recent` 复盘最近事务。
-3. **波形/频谱分析**：`settings_set` 切协议/波特率（UI 同步跟随）→ `wave_snapshot`/`spectrum_snapshot` 取数值 → 离线算频率/RMS；或 `record` 录制后 `--replay` 反复解析。频谱页还提供程序化 `export_csv/export_png`（见频谱页面板）。
+3. **波形/频谱分析**：`settings_set` 切协议/波特率（UI 同步跟随）→ `wave_snapshot`/`spectrum_snapshot` 取数值 → 离线算频率/RMS；或 `record` 录制后 `--replay` 反复解析。频谱数据的导出走频谱页 GUI 按钮（「导出PNG」=带参数标注的拼图、「导出CSV」=最新一帧或最近 N 秒；AI 控制通道暂无对应命令，数据面用 `spectrum_snapshot` 即可离线重算）。
 4. **人机协作**：人操作 GUI，AI 通过控制通道读 `status`/`read_lines`/`spectrum_snapshot` 辅助判断，用 `settings_set`/`wave_sim`/`record` 驱动界面（改后控件与内部状态一致，`before/after` 可核对）。
 
 注意：AI 执行本工具命令前请确认串口号与波特率；无头模式的 `--flash-command`/`--reset-mode command` 会执行任意命令行，调用方需自行保证命令安全。

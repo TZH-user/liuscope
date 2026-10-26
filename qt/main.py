@@ -9,13 +9,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from PySide6 import QtWidgets  # noqa: E402
+from PySide6 import QtGui, QtWidgets  # noqa: E402
 
 from ui import theme  # noqa: E402
 
 
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
+    # 应用图标（任务栏/标题栏；打包后 __file__ 位于解包目录，同样指向 assets/liuscope.ico）
+    _icon = Path(__file__).resolve().parent / 'assets' / 'liuscope.ico'
+    if _icon.exists():
+        app.setWindowIcon(QtGui.QIcon(str(_icon)))
     # 启动恢复主题（读设置键 ui/theme，缺省深色）：一处统一，MainWindow 内不再重复设置
     theme.apply_saved_theme(app)
 

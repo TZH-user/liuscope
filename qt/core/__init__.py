@@ -5,6 +5,6 @@
 接续主线版本号；v1.2.0 起软件更名 LiuScope（中文别名「柳镜」，原名 serialscope）；
 PowerShell 实现封版于 v1.0.0，已整体移至 ps-legacy 分支作存档。
 """
-APP_VERSION = '1.2.0'
+APP_VERSION = '1.2.1'
 APP_NAME = 'LiuScope'
 REPO_URL = 'https://github.com/TZH-user/liuscope'

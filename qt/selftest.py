@@ -1944,7 +1944,9 @@ def test_wave_display_and_hover():
         # ---- 悬停读数 ----
         wave._hide_hover()
         start, end, _follow = st.view_range()
-        x_probe = float(start) + 5.5      # 半帧偏移 → searchsorted 最近样本应为 start+5
+        # 1/4 帧偏移：探针必须避开两采样点正中（5.5 处经控件像素取整会随机偏向
+        # start+6，此前固定挂「y 应取真实采样点」），5.25 离中点远于像素取整误差
+        x_probe = float(start) + 5.25     # → 最近样本恒为 start+5
         vb = wave.plot.getViewBox()
         y_mid = sum(vb.viewRange()[1]) / 2.0
         scene = vb.mapViewToScene(QtCore.QPointF(x_probe, y_mid))
@@ -2302,6 +2304,110 @@ def test_theme_switching():
     print('THEME SWITCH OK')
 
 
+def _wcag_contrast(fg, bg):
+    """WCAG 2.x 相对亮度对比度（#RRGGBB 或 (r,g,b)），对比度审计公用小函数。"""
+    def lum(color):
+        if isinstance(color, str):
+            h = color.lstrip('#')
+            r, g, b = (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+        else:
+            r, g, b = (c / 255 for c in color[:3])
+
+        def lin(c):
+            return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+        return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+
+    l1, l2 = lum(fg), lum(bg)
+    if l1 < l2:
+        l1, l2 = l2, l1
+    return (l1 + 0.05) / (l2 + 0.05)
+
+
+def _grab_ink_pair(widget):
+    """grab 像素抽样：(最常见色=底, 距底最远像素=墨色, 墨距)。防「配色表对但渲染不对」。"""
+    img = widget.grab().toImage()
+    counts = {}
+    for y in range(img.height()):
+        for x in range(img.width()):
+            c = img.pixelColor(x, y)
+            key = (c.red(), c.green(), c.blue())
+            counts[key] = counts.get(key, 0) + 1
+    bg = max(counts, key=counts.get)
+    fg = max(counts, key=lambda k: sum(abs(a - b) for a, b in zip(k, bg)))
+    return bg, fg, sum(abs(a - b) for a, b in zip(fg, bg))
+
+
+def test_theme_contrast():
+    """集成⑪：双主题对比度——浅色 tool 按钮蓝底白字、禁用按钮弱化蓝灰可辨、
+    两主题页签未选中文字与 RX/TX/SYS 日志行色全过 WCAG（正文 ≥4.5、禁用 ≥3.0），
+    代表控件 grab 像素抽样复核渲染（配色表对≠渲染对）。"""
+    from PySide6 import QtWidgets
+
+    import ui.main_window as mw
+    from core.settings import write_setting
+    from ui import theme
+
+    saved = _snapshot_settings(('ui/theme', 'stm32_cli_path'))
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    try:
+        for name in (theme.LIGHT_KEY, theme.DARK_KEY):
+            # MainWindow.__init__ 会按 ini 恢复主题，先写入目标主题再建窗
+            write_setting(theme.THEME_SETTING_KEY, name)
+            theme.set_theme(name)
+            win = mw.MainWindow()
+            win.show()
+            win._port_watch_timer.stop()
+            win.chk_auto_save.setChecked(False)
+            win.wave.state.enabled = False
+            assert theme.current_theme() == name, '建窗后必须是目标主题'
+            p = theme.palette()
+            tag = theme.theme_label(name)
+
+            # ---- 语义配对：正文 ≥4.5 / 禁用 ≥3.0 ----
+            # tool 按钮（浅色蓝底白字回归：旧浅灰底 #DDE3EC 配白字几乎不可读）
+            assert _wcag_contrast('#FFFFFF', p['tool_btn']) >= 4.5, f'[{tag}] tool 按钮字/底'
+            assert _wcag_contrast('#FFFFFF', p['tool_btn_hover']) >= 4.5, f'[{tag}] tool 按钮 hover'
+            assert _wcag_contrast('#FFFFFF', p['accent']) >= 4.5, f'[{tag}] checked/主按钮字/底'
+            # 页签未选中文字/底（两主题都断言）
+            assert _wcag_contrast(p['text_dim'], p['panel']) >= 4.5, f'[{tag}] 页签未选中文字/底'
+            assert _wcag_contrast(p['text'], p['window']) >= 4.5, f'[{tag}] 页签选中文字/底'
+            # RX/TX/SYS 日志行色对 log_bg（两主题都断言）
+            for key in ('rx', 'tx', 'sys'):
+                assert _wcag_contrast(p[key], p['log_bg']) >= 4.5, f'[{tag}] 日志行 {key}/log_bg'
+            # 禁用按钮：白字对弱化底可辨（浅色旧 border 灰 #B9C2CF 仅 1.8）
+            assert _wcag_contrast('#FFFFFF', p['btn_disabled_bg']) >= 3.0, f'[{tag}] 禁用按钮字/底'
+
+            # ---- 像素抽样复核（清空日志避开离屏追加行不重绘的怪癖） ----
+            win.clear_log()
+            win._append_log('RX', 'temp=23.50')
+            win._append_log('TX', 'AT')
+            win._append_log('SYS', '对比度抽样')
+            win.settings_page.set_cli_path('')   # 置出禁用按钮样本
+            app.processEvents()
+
+            bg, fg, dist = _grab_ink_pair(win.btn_clear_log)
+            assert dist > 60, 'tool 按钮图内应有墨色'
+            assert ('#%02X%02X%02X' % bg).lower() == p['tool_btn'].lower(), \
+                f'[{tag}] tool 按钮渲染底色 {bg} 应等于配色表 {p["tool_btn"]}'
+            assert _wcag_contrast(fg, bg) >= 4.5, f'[{tag}] tool 按钮实测墨色对比'
+
+            btn = win.settings_page.btn_cli_reset
+            assert not btn.isEnabled(), 'CLI 路径为空时恢复按钮应禁用'
+            bg, fg, dist = _grab_ink_pair(btn)
+            assert dist > 60, '禁用按钮图内应有墨色'
+            assert ('#%02X%02X%02X' % bg).lower() == p['btn_disabled_bg'].lower(), \
+                f'[{tag}] 禁用按钮渲染底色 {bg} 应等于配色表 {p["btn_disabled_bg"]}'
+            assert _wcag_contrast(fg, bg) >= 3.0, f'[{tag}] 禁用按钮实测墨色对比'
+
+            win._port_watch_timer.stop()
+            win.close()
+        theme.set_theme(theme.DARK_KEY)
+    finally:
+        _restore_settings(saved)
+    print('THEME CONTRAST OK')
+
+
 def test_ai_channel_extended():
     """集成⑧：AI 控制通道——help 结构化命令表 / spectrum_snapshot 合法数组 /
     settings_set UI 同步（含中文别名与已连接拒绝）/ Modbus 事务后同一连接仍存活。"""
@@ -2418,6 +2524,17 @@ def test_ai_channel_extended():
         app.processEvents()
         assert r.get('ok') and win.wave.combo_window.currentText() == '2500' \
             and win.wave.state.window_frames == 2500, '显示点数改后下拉与内部状态应一致'
+        r = rpc({'cmd': 'settings_set', 'key': 'points', 'value': 10})
+        app.processEvents()
+        assert r.get('ok') and r.get('after') == '50' \
+            and win.wave.state.window_frames == 50, 'points 低于下限应钳制到 50（E2E B-03）'
+        r = rpc({'cmd': 'settings_set', 'key': 'points', 'value': 999999})
+        app.processEvents()
+        assert r.get('ok') and win.wave.state.window_frames == 200000, \
+            'points 超上限应钳制到 200000（E2E B-03）'
+        r = rpc({'cmd': 'settings_set', 'key': 'points', 'value': 2500})
+        app.processEvents()
+        assert r.get('ok') and win.wave.combo_window.currentText() == '2500'
         r = rpc({'cmd': 'settings_set', 'key': 'fill', 'value': False})
         app.processEvents()
         assert r.get('ok') and win.settings_page.chk_fill.isChecked() is False \
@@ -2438,6 +2555,11 @@ def test_ai_channel_extended():
                                    ('baud', 'port', 'protocol', 'theme', 'points', 'fill', 'paused'))
         r = rpc({'cmd': 'settings_get', 'key': '波特率'})
         assert r.get('ok') and r.get('value') == '115200'
+        r = rpc({'cmd': 'stm32_status'})
+        app.processEvents()
+        assert r.get('ok') and r.get('available') is True \
+            and isinstance(r.get('note'), str) and r.get('note'), \
+            'stm32_status 应带明确 note 字段（E2E Q13①）'
         r = rpc({'cmd': 'settings_set', 'key': 'filter', 'value': 'x'})
         assert not r.get('ok'), '只读键应拒绝写'
         # ---- Modbus 与 AI 通道共存（poll.stop() 修复回归：嵌套事件循环后同连接仍存活） ----
@@ -2827,6 +2949,7 @@ def run_selftest() -> int:
     test_xy_new_params()
     test_spectrum_axis_sync_export()
     test_theme_switching()
+    test_theme_contrast()
     test_ai_channel_extended()
     test_stm32_fake_cli()
     test_main_tabs_integration()

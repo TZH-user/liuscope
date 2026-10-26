@@ -1,4 +1,4 @@
-# LiuScope（柳镜）· RK3562 串口收发工具 V6
+# <img src="qt/assets/liuscope_256.png" width="42" align="top" alt="LiuScope 图标：垂柳与示波水线"/> LiuScope（柳镜）· RK3562 串口收发工具 V6
 
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-blue)
 ![Qt](https://img.shields.io/badge/%E4%B8%BB%E7%BA%BF-Qt%20(PySide6)%20v1.2.0-41CD52)
@@ -24,6 +24,15 @@
 | 关于页 |
 |---|
 | ![关于页](docs/screenshots/about_dark.png) |
+
+<details>
+<summary><b>浅色主题</b>（设置页一键切换，全页跟随）</summary>
+
+| 终端页（浅色） | 设置页（浅色） |
+|---|---|
+| ![终端页浅色](docs/screenshots/main_light.png) | ![设置页浅色](docs/screenshots/settings_light.png) |
+
+</details>
 
 ---
 
@@ -137,6 +146,9 @@ LiuScope/
 
 ## 📄 更多文档
 
+- [CHANGELOG.md](CHANGELOG.md) — 版本变更日志（SemVer + Keep a Changelog）
+- [docs/用户手册_v1.2.md](docs/用户手册_v1.2.md) — v1.2 新功能手册（STM32 烧录页 / AI 通道速用 / 频谱导出口径 / 主题与设置）
+- [docs/设计_Linux设备互联_v2.md](docs/设计_Linux设备互联_v2.md) — 下一版：鲁班猫投屏 + 交互 + 串口网络化（含调研与里程碑）
 - [qt/README_QT.md](qt/README_QT.md) — Qt 主线里程碑（M1~M5、v1.2.0 收口）与实现口径
 - [AI_INTERFACE.md](AI_INTERFACE.md) — AI 控制通道（TCP 9101 JSON 行协议）+ 无头模式接入指南
 

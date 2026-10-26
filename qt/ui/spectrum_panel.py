@@ -708,7 +708,8 @@ class _ExportCsvDialog(QtWidgets.QDialog):
         self.lbl_info = QtWidgets.QLabel(
             f'累计采集时长: {acq:.1f} s | 导出缓冲: {len(panel._hist)} 帧')
         self.lbl_warn = QtWidgets.QLabel('')
-        self.lbl_warn.setStyleSheet('color: #FFC85A;')
+        # 警告色随主题取 status_warn（深色亮琥珀 / 浅色深琥珀，白底上 #FFC85A 对比仅 1.4）
+        self.lbl_warn.setStyleSheet(f'color: {theme.color("status_warn")};')
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok

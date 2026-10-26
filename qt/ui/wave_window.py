@@ -598,8 +598,13 @@ class WaveWindow(QtWidgets.QWidget):
         self._new_plot_menu().exec(global_pos)
 
     def _restore_auto_range(self):
-        """恢复自动缩放：自动Y + 回到实时跟随（最新「显示点数」窗口）。"""
+        """恢复自动缩放：自动Y + 回到实时跟随 + 宽度还原为「显示点数」
+        （历史滑块把窗口拖窄后一键回正；同值重选显示点数因 set_view_width 早退不会还原，故在此显式还原）。"""
         self.chk_auto_y.setChecked(True)
+        try:
+            self.state.set_view_width(int(self.combo_window.currentText()))
+        except ValueError:
+            pass
         self.state.view_start = -1
         self.repaint_wave()
 
@@ -657,7 +662,8 @@ class WaveWindow(QtWidgets.QWidget):
         self._vline.show()
         self._hline.show()
         # 首行 x 坐标，随后每条可见曲线一行「曲线名: y值」，文字颜色与曲线一致
-        lines = [f'<span style="color:#E1E6F0;">x = {vpt.x():.0f}</span>']
+        # （x 行用主题主文本色，硬编码深色 #E1E6F0 在浅色读数白底上不可见）
+        lines = [f'<span style="color:{theme.color("text")};">x = {vpt.x():.0f}</span>']
         for name, y, color in rows:
             lines.append(f'<span style="color:{color};">{name}: {y:.6g}</span>')
         self._readout.setHtml('<br>'.join(lines))
