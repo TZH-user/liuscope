@@ -1,26 +1,22 @@
-# serialscope-qt（qt-frontend-spike 支线）
+# LiuScope（柳镜，原 serialscope-qt）Qt 主线
 
-用 PySide6（Qt for Python）重写前端的实验支线。**稳定并通过合并评估前不会合入 master**；
-master（PowerShell / WinForms）继续独立维护，两边版本号平行：
-
-| 线 | 版本口径 | 说明 |
-|---|---|---|
-| master（主线） | `app_version` 1.1.0（开发中）→ 下个 Release v1.1.0 | 现有全部功能，真机回归后发布 |
-| qt-frontend-spike（支线） | 0.5.0-qt，0.x = 实验期 | Qt 新前端，主线功能已全量复刻，待真机回归 |
+用 PySide6（Qt for Python）实现的主线前端。**自 v1.1.0 起 Qt 实现转正为主线**
+（经压力/交互/真机浸泡测试验收）；v1.2.0 起软件更名 LiuScope（中文别名「柳镜」）。
+PowerShell 实现封版于 v1.0.0，已整体移至 ps-legacy 分支作零安装存档。
 
 ## 运行与自测
 
 ```powershell
 python -m pip install PySide6-Essentials pyserial pyqtgraph   # 一次性环境准备（已装可跳过）
 python qt/main.py                # 运行（想不占控制台可用 pythonw qt\main.py）
-python qt/main.py --selftest     # 离屏自测（无需显示器/串口，23 组断言）
+python qt/main.py --selftest     # 离屏自测（无需显示器/串口，33 组断言）
 python qt/headless_main.py --help   # 无头捕获 CLI（不开界面，供 AI/脚本调用）
 ```
 
-打包（实测约 101 MB 单文件 exe，全套自测通过；`--windowed` = 启动不弹 cmd 黑窗）：
+打包（单文件 exe，`--windowed` = 启动不弹 cmd 黑窗；产物名随 v1.2.0 更名为 LiuScope）：
 
 ```powershell
-python -m PyInstaller --noconfirm --onefile --windowed --paths qt --name serialscope-qt qt/main.py
+python -m PyInstaller --noconfirm --onefile --windowed --paths qt --name LiuScope qt/main.py
 ```
 
 ## 为什么试 Qt
@@ -99,7 +95,39 @@ qt/
   ui/log_hover.py       日志行悬停互转提示
   ui/history_edit.py    发送历史输入框
   ui/theme.py           深色 QSS + 日志行配色
-  selftest.py           离屏自测（23 组：RX 缓冲/HEX/主窗体/终端外观/热插拔/时间查找/自动日志/
+  selftest.py           离屏自测（33 组：RX 缓冲/HEX/主窗体/终端外观/热插拔/时间查找/自动日志/
                         悬停互转/HardFault+AI 文档/预设/XY/录制/控制通道/headless/协议/波形页/
-                        M3/Modbus×2/更新×2/频谱×2）
+                        M3/Modbus×2/更新×2/频谱×2 + 集成收口 9 组：连接按钮状态/TX 右对齐+
+                        悬停互转/显示点数+悬停读数/XY 新参数/频谱联动导出/主题切换/
+                        AI 通道扩展/STM32 假 CLI/七页签集成）
 ```
+
+## v1.2.0 里程碑（LiuScope 更名与收口）
+
+- **更名与版本**：`APP_VERSION` 1.1.0 → 1.2.0，软件更名 **LiuScope**（中文别名「柳镜」，
+  原 serialscope）；窗口标题、关于页（品牌/别名/作者 折柳/仓库）、更新检查 URL 与
+  User-Agent、AI 接入文档同步更名。PowerShell 存档版（v1.0.0 封版）整体移至 ps-legacy 分支。
+- **设置/关于页 + 双主题**：主题深/浅色即时切换并写 ini 记忆（重启保持），全局 QSS +
+  pyqtgraph 绘图区 + 曲线 16 色 + 频谱轨迹 + 芯片边框 + XY 格配色整套随主题；
+  「曲线填充」开关迁到设置页（设置键 `wave/fill_under`，即时生效）；关于页含作者与许可证。
+- **STM32 烧录页**：基于 STM32CubeProgrammer CLI——CLI 四级路径解析（设置键 → C:\ST →
+  PATH → 盘符扫描）、ST-LINK 探测/多探针选择、连接与芯片信息、软/硬复位、hex/bin 烧录
+  （-v 校验、bin 基址可改）、全片擦除与读保护解除（危险二次确认）、OB 读取、CLI 原始日志。
+- **波形页改造**：工具行「窗口」→「显示点数」；「导出」菜单按钮（PNG/CSV）；绘图区右键
+  全中文菜单（恢复自动缩放/导出/显示网格）；XY 相位图补齐每窗分格与全局 线/点 画法、
+  余晖量程切换拉伸迁移与换源保留、进入即回铺最近窗口；悬停十字线 + 读数框
+  （首行 x + 每条可见曲线一行同色 y，取真实采样点）。
+- **频谱页改造**：谱图与瀑布频率轴 (0, fs/2) 双向联动（同频点垂直对齐）；导出 PNG
+  （谱+瀑布拼图 + QPainter 参数标注）；导出 CSV（最新一帧 / 最近 N 秒，N 超采集时长
+  自动钳制）；「清空」一键复位；Marker 改走纯计算消除鼠标副作用。
+- **终端页改造**：连接按钮状态化（手动/自动/丢失/失败全路径同步）；TX 行聊天式右对齐
+  （文档级 RightTab 制表位 + 行首制表符，随视口宽度重排）；悬停互转修复（空正文条目、
+  TX 制表行兼容）。
+- **AI 控制通道规范化**：COMMANDS 单一事实命令表（19 条）；read_lines 增强（follow=true
+  持续推送：interval 节流 0.05~60s、max_lines 上限 2000，stop/断开退出）；
+  spectrum_snapshot/xy_snapshot/modbus_recent/stm32_status/settings_list/get/set
+  （7 个可写键，改后 UI 控件同步，返回 before/after）；AI_INTERFACE.md 全量重写。
+- **集成收口**：离屏自测扩到 33 组（新增连接按钮状态/TX 右对齐+悬停互转/显示点数+
+  悬停读数/XY 新参数/频谱联动与导出/主题切换/AI 通道扩展/STM32 假 CLI/七页签集成）；
+  修复 ControlChannel socket 延迟析构在嵌套事件循环触发 access violation 的真实缺陷；
+  main.py 启动主题统一走 apply_saved_theme()。

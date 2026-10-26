@@ -17,6 +17,7 @@ import time
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from core import APP_NAME, APP_VERSION, REPO_URL
+from core.ai_doc import get_control_channel_doc
 from core.auto_log import AutoLogWriter, build_log_export_text, format_entry_block, get_log_dir
 from core.control_channel import ControlAPI, ControlChannel, handle_control_request
 from core.fault_decode import test_fault_dump_line
@@ -32,12 +33,39 @@ from ui.find_bar import FindBar
 from ui.history_edit import HistoryLineEdit
 from ui.log_hover import LogHoverTip
 from ui.modbus_panel import ModbusPanel
+from ui.settings_page import SettingsPage
 from ui.spectrum_panel import SpectrumPanel
-from ui.theme import RX_COLOR, SYS_COLOR, TIME_COLOR, TX_COLOR
+from ui.stm32_panel import Stm32Panel
+from ui import theme
 from ui.wave_window import WaveWindow
 
 NEWLINE_TEXT = {'无': '', 'LF': '\n', 'CR': '\r', 'CRLF': '\r\n'}
 NEWLINE_BYTES = {'无': b'', 'LF': b'\n', 'CR': b'\r', 'CRLF': b'\r\n'}
+
+# AI 通道 settings_set/get 的键别名（英文键 + 中文常用名 → 规范键）
+_SETTING_ALIASES = {
+    'baud': 'baud', '波特率': 'baud', 'baudrate': 'baud',
+    'port': 'port', '串口': 'port', 'serial_port': 'port',
+    'protocol': 'protocol', '协议': 'protocol',
+    'theme': 'theme', '主题': 'theme',
+    'points': 'points', 'window': 'points', '显示点数': 'points',
+    'fill': 'fill', 'fill_under': 'fill', 'curve_fill': 'fill', '曲线填充': 'fill',
+    'paused': 'paused', 'pause': 'paused', '暂停': 'paused',
+}
+
+
+def _to_bool(value):
+    """宽解析布尔（true/false/1/0/on/off/yes/no）；非法返回 None。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ('true', '1', 'on', 'yes'):
+        return True
+    if text in ('false', '0', 'off', 'no'):
+        return False
+    return None
 
 FILE_CHUNK = 4096   # 4 KiB/20ms ≈ 上限 200 KiB/s（对齐主线）
 FILE_INTERVAL_MS = 20
@@ -78,6 +106,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def __init__(self):
         super().__init__()
+        # 启动主题恢复（读设置键 ui/theme，缺省深色）：先于各页创建，
+        # pyqtgraph 控件即按主题背景/前景初始化（main.py 的深色 QSS 由这里覆盖统一）
+        theme.apply_saved_theme(QtWidgets.QApplication.instance())
         self.setWindowTitle(f'{APP_NAME} v{APP_VERSION}')
         self.resize(980, 620)
 
@@ -87,7 +118,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._file_send: dict | None = None
         self._modbus_rx_acc = bytearray()  # Modbus 事务在途时的响应累积
         self._modbus_active = False  # 仅事务在途时累积 RX 字节，闲时洪泛不再无界增长
-        self.message_entries: list[dict] = []  # {ts, direction, text}：导出/自动日志/控制通道共用
+        self.message_entries: list[dict] = []  # {ts, direction, text, seq}：导出/自动日志/控制通道共用
+        self._log_seq = 0               # 日志条目单调序号：read_lines follow 推送的游标
+        self._modbus_recent: list[dict] = []  # 最近 Modbus 事务摘要（AI 通道 modbus_recent 数据源）
         self.rx_bytes_total = 0
         self.tx_bytes_total = 0
         self._known_port_names: list[str] | None = None  # 热插拔基线（None=还没首扫）
@@ -137,6 +170,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # 注意：这里不能再挂控件级静态 tooltip——Qt 会先弹它，抢掉逐行
         # HEX⇄文本转换提示框（LogHoverTip，0.4s 延迟）。
         self._log_hover = LogHoverTip(self.log)
+        # TX 行聊天式右对齐靠文档级 RightTab 制表位（见 _sync_log_tab_stop），
+        # 这里记下当前制表位，宽度变了才重设，避免每条日志都触发整篇重排。
+        self._log_tab_stop_px = None
+        self._sync_log_tab_stop()
         self.find_bar = FindBar(self.log)
         self.find_bar.setVisible(False)
 
@@ -211,7 +248,7 @@ class MainWindow(QtWidgets.QMainWindow):
         terminal_layout.addWidget(self.log, 1)
         terminal_layout.addLayout(bottom)
 
-        # ---- 页签：终端 / 波形 / 频谱 / Modbus ----
+        # ---- 页签：终端 / 波形 / 频谱 / Modbus / 设置 / 关于 ----
         self.wave = WaveWindow()
         # 场景预设要读写主窗体波特率（只改选择不重连，对齐主线）
         self.wave.baud_getter = self.combo_baud.currentText
@@ -220,11 +257,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.modbus = ModbusPanel()
         self.modbus.transport = self.modbus_transport
         self.modbus.log_fn = self._append_log
+        self.stm32 = Stm32Panel()
+        self.stm32.log_fn = self._append_log
+        self.settings_page = SettingsPage(self.wave)
+        self.about_page = self._build_about_page()
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(terminal, '终端')
         self.tabs.addTab(self.wave, '波形')
         self.tabs.addTab(self.spectrum, '频谱')
         self.tabs.addTab(self.modbus, 'Modbus')
+        self.tabs.addTab(self.stm32, 'STM32')
+        self.tabs.addTab(self.settings_page, '设置')
+        self.tabs.addTab(self.about_page, '关于')
         self.tabs.setObjectName('main_tabs')
         self.setCentralWidget(self.tabs)
 
@@ -262,8 +306,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._control_channel.start():
             self._append_log('SYS',
                              f'AI 控制通道已开启: tcp://127.0.0.1:{self._control_channel.port}'
-                             '（JSON 行协议: ping/status/send/read_lines/wave_snapshot/'
-                             'set_protocol/wave_clear/wave_sim/record/list_ports）')
+                             '（JSON 行协议: ping/help/status/send/read_lines[+follow]/'
+                             'wave_snapshot/spectrum_snapshot/xy_snapshot/modbus_recent/'
+                             'stm32_status/settings_*，命令表发 {"cmd":"help"}；'
+                             '详见 AI_INTERFACE.md）')
         else:
             self._append_log('SYS', 'AI 控制通道端口被占用，未开启（可能已有实例在运行）')
         self.act_copy_ai = QtGui.QAction('复制 AI 接入信息', self)
@@ -402,27 +448,51 @@ class MainWindow(QtWidgets.QMainWindow):
             self._append_log('TX', display.replace('\r', '<CR>').replace('\n', '<LF>'))
             return {'ok': True}
 
-        def read_lines(count: int, filter: str) -> dict:  # noqa: A002 (协议字段名)
+        def read_lines(count: int = 20, filter: str = '',  # noqa: A002 (协议字段名)
+                       since: int = -1) -> dict:
+            """读最近记录。since<0 = 快照（最新 count 行）；since>=0 = follow 推送
+            （只回 seq>since 的新行，时间升序、count 上限，cursor=最后交付条目序号）。"""
             regex = _re.compile(filter) if filter else None
-            start = max(0, len(self.message_entries) - count)
-            lines = []
-            for entry in self.message_entries[start:]:
+            if since < 0:
+                start = max(0, len(self.message_entries) - count)
+                lines = []
+                for entry in self.message_entries[start:]:
+                    if regex is not None and not regex.search(entry['text']):
+                        continue
+                    lines.append({
+                        't': entry['ts'].strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
+                        'dir': entry['direction'],
+                        'text': entry['text'],
+                    })
+                return {'ok': True, 'lines': lines, 'cursor': self._log_seq}
+            lines: list[dict] = []
+            cursor = since
+            for entry in self.message_entries:
+                if entry.get('seq', 0) <= since:
+                    continue
                 if regex is not None and not regex.search(entry['text']):
                     continue
+                if len(lines) >= max(1, count):
+                    break  # 超出单次推送上限的剩余行下一轮再推
                 lines.append({
                     't': entry['ts'].strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
                     'dir': entry['direction'],
                     'text': entry['text'],
                 })
-            return {'ok': True, 'lines': lines}
+                cursor = entry.get('seq', cursor)
+            return {'ok': True, 'lines': lines, 'cursor': cursor}
 
         def wave_snapshot(count: int) -> dict:
             st = self.wave.state
             take = min(max(1, count), st.frame_count)
             channels = [{'name': st.channel_display_name(c),
+                         'enabled': bool(st.enabled_channels[c])
+                         if c < len(st.enabled_channels) else True,
                          'values': list(st.snapshot(c, take))}
                         for c in range(len(st.ch_values))]
             return {'ok': True, 'protocol': st.protocol, 'frame_total': st.frame_total,
+                    'frame_count': st.frame_count, 'paused': st.paused,
+                    'window_frames': int(st.window_frames),
                     'count': take, 'channels': channels}
 
         def set_protocol(protocol: str) -> dict:
@@ -444,35 +514,258 @@ class MainWindow(QtWidgets.QMainWindow):
             return {'ok': True, 'recording': self.recorder.active,
                     'file': self.recorder.path}
 
+        # ---- 数据获取扩展（频谱 / XY / Modbus / STM32）----
+
+        def spectrum_snapshot(count: int = 0) -> dict:
+            """频谱快照：FFT 频点+dB（count>0 截高频端最新 N 点）、主频、当前参数、
+            瀑布最近帧与累计采集时长（数据全部来自频谱页公开属性）。"""
+            import numpy as _np
+
+            from core.dsp import max_bin as _max_bin
+            sp = self.spectrum
+            out = {'ok': True, 'frozen': sp.frozen,
+                   'acquisition_seconds': round(sp.acquisition_seconds, 3),
+                   'peak_hold': sp.chk_peak.isChecked(),
+                   'average': sp.chk_avg.isChecked(),
+                   'waterfall_on': sp.chk_wf.isChecked(),
+                   'waterfall_rows': len(getattr(sp, '_waterfall', []))}
+            analysis = sp.last_analysis
+            if analysis is None:
+                out.update({'empty': True, 'params': {}, 'freqs_hz': [], 'db': [],
+                            'note': '暂无有效频谱数据（频谱页未收到数据或刚清空）'})
+                return out
+            db = analysis['db']
+            take = max(1, min(int(count), db.size)) if count and count > 0 else db.size
+            db_cut = db[-take:]
+            freqs_cut = _np.arange(db.size) * analysis['df']
+            freqs_cut = freqs_cut[-take:]
+            peak_idx = int(_max_bin(db, 1))  # 跳过 DC 的主频 bin
+            out.update({
+                'empty': False,
+                'params': {'sample_rate_hz': float(analysis['fs']),
+                           'fft_points': int(analysis['used']),
+                           'window': analysis['window'],
+                           'df_hz': float(analysis['df']),
+                           'rbw_enbw_hz': float(analysis['rbw']),
+                           'channel': int(analysis['channel']),
+                           'channel_name': self.wave.state.channel_display_name(
+                               analysis['channel']),
+                           'ref_db': sp._read_scale()[0],
+                           'div_db': float(sp.combo_div.currentText())},
+                'peak': {'freq_hz': peak_idx * analysis['fs'] / analysis['used'],
+                         'db': float(db[peak_idx])},
+                'total_bins': int(db.size), 'count': int(take),
+                'freq_start_hz': float(freqs_cut[0]) if take else 0.0,
+                'freqs_hz': [round(float(x), 6) for x in freqs_cut.tolist()],
+                'db': [round(float(x), 3) for x in db_cut.tolist()],
+                'note': 'db=FFT 幅度谱 dB（频率升序）；waterfall_latest=瀑布最新帧'
+                        '（每频点 [R,G,B] 0..255，与瀑布图渲染同源；同口径截取）'})
+            wf = getattr(sp, '_waterfall', [])
+            if wf:
+                row = wf[0][-take:]  # 面板口径 _waterfall[0]=最新帧（最新在顶）；行=uint8[n,3] 每频点 RGB
+                out['waterfall_latest'] = [list(map(int, triple)) for triple in row.tolist()]
+            return out
+
+        def xy_snapshot(count: int = 512) -> dict:
+            """XY 相位图各窗口最新轨迹（源通道最新 N 点）与窗口参数。"""
+            xy = getattr(self.wave, 'xy_section', None)
+            if xy is None:
+                return {'ok': False, 'error': 'XY 相位图未就绪'}
+            st = self.wave.state
+            take = max(1, min(int(count), max(1, st.frame_count)))
+            windows = []
+            for slot, cell in enumerate(getattr(xy, '_cells', [])):
+                windows.append({
+                    'window': slot + 1,
+                    'x_channel': int(cell.x_ch), 'y_channel': int(cell.y_ch),
+                    'x_name': st.channel_display_name(cell.x_ch),
+                    'y_name': st.channel_display_name(cell.y_ch),
+                    'span': cell.span_option, 'divs': int(cell.divs),
+                    'draw_mode': cell.draw_mode,
+                    'persist': getattr(cell, '_persist_option', ''),
+                    'x': st.snapshot(cell.x_ch, take),
+                    'y': st.snapshot(cell.y_ch, take)})
+            return {'ok': True, 'xy_on': self.wave.btn_xy.isChecked(),
+                    'window_count': len(windows), 'windows': windows,
+                    'note': 'x/y 为各窗口源通道最新 take 点（时间升序）'}
+
+        def modbus_recent(count: int = 20) -> dict:
+            hist = getattr(self, '_modbus_recent', [])
+            take = hist[-max(1, int(count)):]
+            return {'ok': True, 'transactions': take,
+                    'note': '时间升序；ok=false 表示无响应/超时；req_hex/resp_hex 为线上帧'}
+
+        def stm32_status() -> dict:
+            panel = getattr(self, 'stm32', None)
+            if panel is None:
+                return {'ok': True, 'available': False,
+                        'note': 'STM32 页未挂接到主窗体（页未就绪）'}
+            fn = getattr(panel, 'ai_status', None)  # 页面未来可提供更丰富的状态口
+            if callable(fn):
+                try:
+                    return {'ok': True, 'available': True, **(fn() or {})}
+                except Exception as exc:
+                    return {'ok': False, 'error': f'STM32 页状态读取失败: {exc}'}
+            return {'ok': True, 'available': True,
+                    'connected': bool(getattr(panel, 'connected', False)),
+                    'busy': bool(getattr(panel, 'busy', False)),
+                    'note': 'STM32 页已挂接（未提供 ai_status() 时返回基础连接状态）'}
+
+        # ---- 设置读取 / 修改（改后 UI 控件与内部状态一致，返回改前/改后值）----
+
+        def settings_snapshot() -> dict:
+            return {
+                'baud': self.combo_baud.currentText(),
+                'port': self.combo_port.currentText(),
+                'connected': bool(self.worker),
+                'protocol': self.wave.state.protocol,
+                'theme': theme.current_theme(),
+                'points': self.wave.combo_window.currentText(),
+                'fill': self.settings_page.chk_fill.isChecked(),
+                'paused': self.wave.btn_pause.isChecked(),
+                'auto_y': self.wave.chk_auto_y.isChecked(),
+                'filter': self.wave.combo_filter.currentText(),
+                'filter_param': self.wave.spin_filter_param.value(),
+                'rx_format': self.combo_rx_format.currentText(),
+                'tx_format': self.combo_tx_format.currentText(),
+                'newline': self.combo_newline.currentText(),
+                'sim_on': self.wave.btn_sim.isChecked(),
+                'recording': self.recorder.active,
+            }
+
+        def settings_list() -> dict:
+            return {'ok': True, 'settings': settings_snapshot()}
+
+        def settings_get(key: str) -> dict:
+            snap = settings_snapshot()
+            k = _SETTING_ALIASES.get(key.strip().lower(), key.strip().lower())
+            if k in snap:
+                return {'ok': True, 'key': k, 'value': snap[k]}
+            return {'ok': False,
+                    'error': f'未知设置键: {key!r}（用 settings_list 查看全部键名）'}
+
+        def settings_set(key: str, value) -> dict:
+            k = _SETTING_ALIASES.get(str(key).strip().lower(), str(key).strip())
+            if k == 'baud':
+                if self.worker:
+                    return {'ok': False,
+                            'error': '已连接：请先断开再修改波特率（连接期间 UI 已锁定）'}
+                text = str(value).strip()
+                if not text.isdigit() or int(text) <= 0:
+                    return {'ok': False, 'error': f'波特率必须是正整数: {value!r}'}
+                before = self.combo_baud.currentText()
+                self.combo_baud.setCurrentText(text)  # 下拉跟随；信号链写设置记忆
+                return {'ok': True, 'key': 'baud', 'before': before,
+                        'after': self.combo_baud.currentText()}
+            if k == 'port':
+                if self.worker:
+                    return {'ok': False,
+                            'error': '已连接：请先断开再修改串口（连接期间 UI 已锁定）'}
+                text = str(value).strip()
+                idx = self.combo_port.findText(text, QtCore.Qt.MatchStartsWith)
+                if idx < 0:
+                    return {'ok': False,
+                            'error': f'没有串口匹配 {text!r}（可先 list_ports 查看）'}
+                before = self.combo_port.currentText()
+                self.combo_port.setCurrentIndex(idx)
+                return {'ok': True, 'key': 'port', 'before': before,
+                        'after': self.combo_port.currentText()}
+            if k == 'protocol':
+                before = self.wave.combo_protocol.currentText()
+                result = set_protocol(str(value))
+                if not result.get('ok'):
+                    return result
+                return {'ok': True, 'key': 'protocol', 'before': before,
+                        'after': self.wave.state.protocol}
+            if k == 'theme':
+                want = str(value).strip().lower()
+                want = {'深色': 'dark', '浅色': 'light'}.get(want, want)
+                if want not in theme.THEME_LABELS:
+                    return {'ok': False, 'error': 'theme 必须是 dark/light（深色/浅色）'}
+                before = theme.current_theme()
+                idx = self.settings_page.combo_theme.findData(want)
+                if idx < 0:
+                    return {'ok': False, 'error': f'主题下拉缺少选项: {want}'}
+                self.settings_page.combo_theme.setCurrentIndex(idx)  # 信号链：写设置+全页换肤
+                return {'ok': True, 'key': 'theme', 'before': before,
+                        'after': theme.current_theme()}
+            if k == 'points':
+                try:
+                    n = int(str(value).strip())
+                except ValueError:
+                    return {'ok': False, 'error': f'显示点数必须是整数: {value!r}'}
+                before = self.wave.combo_window.currentText()
+                self.wave.combo_window.setCurrentText(str(n))  # → state.set_view_width 钳制
+                return {'ok': True, 'key': 'points', 'before': before,
+                        'after': self.wave.combo_window.currentText()}
+            if k == 'fill':
+                want = _to_bool(value)
+                if want is None:
+                    return {'ok': False, 'error': f'fill 必须是 true/false: {value!r}'}
+                before = self.settings_page.chk_fill.isChecked()
+                self.settings_page.chk_fill.setChecked(want)  # 信号链：写设置键+波形页生效
+                return {'ok': True, 'key': 'fill', 'before': before,
+                        'after': self.settings_page.chk_fill.isChecked()}
+            if k == 'paused':
+                want = _to_bool(value)
+                if want is None:
+                    return {'ok': False, 'error': f'paused 必须是 true/false: {value!r}'}
+                before = self.wave.btn_pause.isChecked()
+                self.wave.btn_pause.setChecked(want)  # 信号链：state.paused+按钮「暂停/继续」
+                return {'ok': True, 'key': 'paused', 'before': before,
+                        'after': self.wave.btn_pause.isChecked()}
+            return {'ok': False,
+                    'error': f'设置键 {key!r} 不可写（可写: baud/port/protocol/theme/'
+                             'points/fill/paused；只读见 settings_list）'}
+
         return ControlAPI(status=status, list_ports=list_ports, send=send,
                           read_lines=read_lines, wave_snapshot=wave_snapshot,
                           set_protocol=set_protocol, wave_clear=wave_clear,
-                          wave_sim=wave_sim, record=record)
+                          wave_sim=wave_sim, record=record,
+                          spectrum_snapshot=spectrum_snapshot, xy_snapshot=xy_snapshot,
+                          modbus_recent=modbus_recent, stm32_status=stm32_status,
+                          settings_list=settings_list, settings_get=settings_get,
+                          settings_set=settings_set)
 
     def _copy_ai_info(self):
         """一键复制 AI 接入信息（控制通道 + 无头模式），粘贴给其他 AI 即可用。"""
         port = self._control_channel.port if self._control_channel.listening else 9101
-        text = (
-            '【RK3562 串口收发工具 V6 (Qt) AI 接入】\n'
-            f'1) 控制通道（与 GUI 共存）: TCP 127.0.0.1:{port}，'
-            '每行发一个 JSON 请求，逐行收 JSON 响应。\n'
-            '   命令: {"cmd":"ping"} | {"cmd":"status"} | {"cmd":"list_ports"} | '
-            '{"cmd":"send","text":"AT"} | {"cmd":"read_lines","count":50,"filter":"err"} | '
-            '{"cmd":"wave_snapshot","count":100} | {"cmd":"set_protocol","protocol":"JustFloat"} | '
-            '{"cmd":"wave_clear"} | {"cmd":"wave_sim","on":true} | {"cmd":"record","on":true}\n'
-            '2) 无头模式（AI 独占串口不开界面）: '
-            'python qt/headless_main.py --port COM9 --baud 115200 --protocol FireWater '
-            '--duration 5 --record\n'
-            '   协议: FireWater/JustFloat/RawData；退出码 0 正常 | 2 错误模式命中 | '
-            '3 期望失败 | 4 复位失败 | 5 烧录失败\n')
-        QtWidgets.QApplication.clipboard().setText(text)
+        QtWidgets.QApplication.clipboard().setText(get_control_channel_doc(port))
         self._append_log('SYS', '已复制 AI 接入信息到剪贴板，可直接粘贴给其他 AI/脚本')
+
+    def _build_about_page(self) -> QtWidgets.QWidget:
+        """关于页签：品牌（LiuScope/柳镜）/版本（读 core.APP_VERSION，不在此维护）/
+        作者/许可证/仓库/简介。"""
+        page = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(page)
+        lay.setSpacing(8)
+        lay.addStretch(1)
+        title = QtWidgets.QLabel(
+            f'<span style="font-size:16pt; font-weight:bold">{APP_NAME}</span>'
+            f'<span style="font-size:12pt"> v{APP_VERSION}</span>')
+        title.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter)
+        alias = QtWidgets.QLabel('别名: 柳镜（原 serialscope）')
+        intro = QtWidgets.QLabel(
+            '串口调试助手：终端收发、实时波形、频谱分析与 Modbus 调试一体的 Qt 实现。')
+        author = QtWidgets.QLabel('作者: 折柳')
+        license_lbl = QtWidgets.QLabel('许可证: GPL-3.0')
+        repo = QtWidgets.QLabel(f'仓库: <a href="{REPO_URL}">{REPO_URL}</a>')
+        repo.setOpenExternalLinks(True)
+        repo.setStyleSheet(f'a {{ color: {theme.color("rx")}; }}')  # 深色底下默认链蓝偏暗，随主题提亮
+        for lbl in (title, alias, intro, author, license_lbl, repo):
+            lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter)
+            lay.addWidget(lbl)
+        lay.addStretch(1)
+        return page
 
     def _show_about(self):
         QtWidgets.QMessageBox.about(
             self, f'关于 {APP_NAME}',
-            f'<b>{APP_NAME}</b> v{APP_VERSION}<br>'
-            f'PowerShell 主线（v1.1.0）的 Qt 前端支线实验版。<br>'
+            f'<b>{APP_NAME}</b>（柳镜） v{APP_VERSION}<br>'
+            f'v1.2.0 起更名为 LiuScope（中文别名「柳镜」）；'
+            f'v1.1.0 起 Qt 实现转正为主线实现'
+            f'（PowerShell 实现封版于 v1.0.0，存档移至 ps-legacy 分支）。<br>'
+            f'作者: 折柳<br>'
             f'仓库: <a href="{REPO_URL}">{REPO_URL}</a><br>'
             f'发布页: <a href="{RELEASES_PAGE}">{RELEASES_PAGE}</a><br>'
             f'许可证: GPL-3.0')
@@ -557,6 +850,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.worker:  # 换口重连：先拆旧连接
             self._teardown_worker()
         self.worker = SerialWorker(device, baud, self)
+        self._update_connect_button()
         self._connected_device = device
         self.worker.got_bytes.connect(self.ingest_bytes)
         self.worker.open_failed.connect(lambda msg: (self._teardown_worker(),
@@ -585,6 +879,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_port.setToolTip(tip)
         self.combo_baud.setToolTip(tip)
 
+    def _update_connect_button(self):
+        """连接按钮文案跟连接状态同步：连着显示「断开」，空闲显示「连接」。"""
+        self.btn_connect.setText('断开' if self.worker else '连接')
+
     def _teardown_worker(self):
         self._set_connect_params_locked(False)
         if not self.worker:
@@ -592,6 +890,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.stop()
         self.worker.deleteLater()
         self.worker = None
+        self._update_connect_button()
         self._auto_log.close()  # 断开即落盘收尾（文件名保留，重连后追加同一文件）
 
     def set_status(self, text: str, obj_name: str):
@@ -609,6 +908,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._control_channel.stop()
         self.wave.stop_timers()
         self.spectrum.stop_timers()
+        self.stm32.shutdown()
         self._stop_file_send('窗口关闭')
         self._teardown_worker()
         super().closeEvent(event)
@@ -686,13 +986,28 @@ class MainWindow(QtWidgets.QMainWindow):
             poll.timeout.connect(check)
             poll.start()
             loop.exec()
-            return bytes(self._modbus_rx_acc)
+            poll.stop()  # 切断 poll→check→loop 引用环：否则僵尸定时器在 GC 后
+                         # 于事件分发里抛 RuntimeError，AI 控制通道 socket 从此失聪
+            resp = bytes(self._modbus_rx_acc)
+            self._record_modbus_transaction(frame, resp)
+            return resp
         finally:
             self._modbus_active = False
             self._modbus_rx_acc = bytearray()
 
+    def _record_modbus_transaction(self, frame: bytes, resp: bytes):
+        """记录最近一次 Modbus 事务摘要（上限 50 条；AI 通道 modbus_recent 数据源）。"""
+        self._modbus_recent.append({
+            't': _stamp(),
+            'req_hex': bytes_to_hex_text(frame),
+            'resp_hex': bytes_to_hex_text(resp) if resp else '',
+            'resp_bytes': len(resp),
+            'ok': bool(resp)})
+        del self._modbus_recent[:-50]
+
     def on_flush_tick(self):
         now = time.monotonic()
+        self._sync_log_tab_stop()  # 空闲时窗口缩放后，TX 行制表位跟着视口宽度走
         tail = self.buffer.poll_idle_flush(now)
         if tail is not None:
             self._append_log('RX', f'{tail} (空闲落显)')
@@ -797,7 +1112,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _append_log(self, direction: str, text: str):
         now = datetime.datetime.now()
-        self.message_entries.append({'ts': now, 'direction': direction, 'text': text})
+        self._log_seq += 1
+        self.message_entries.append({'ts': now, 'direction': direction, 'text': text,
+                                     'seq': self._log_seq})
         if len(self.message_entries) > MAX_LOG_ENTRIES:
             # 长跑防涨：与主线同款裁剪量（丢最老 4000 条）
             del self.message_entries[:MAX_LOG_TRIM]
@@ -807,13 +1124,45 @@ class MainWindow(QtWidgets.QMainWindow):
             decoded = test_fault_dump_line(text)
             if decoded:
                 self._append_log('SYS', f'HardFault 解码: {decoded}')
-        color = {'RX': RX_COLOR, 'TX': TX_COLOR}.get(direction, SYS_COLOR)
+        self._sync_log_tab_stop()  # 视口宽度可能在追加间隙变了，先对齐制表位
+        # 日志行配色动态读主题模块（切主题后新日志行随新主题换色）
+        color = {'RX': theme.RX_COLOR, 'TX': theme.TX_COLOR}.get(direction, theme.SYS_COLOR)
         safe = html.escape(text)
         self.log.appendHtml(
-            f'<span style="color:{TIME_COLOR}">[{_stamp()}]</span> '
+            f'<span style="color:{theme.TIME_COLOR}">[{_stamp()}]</span> '
             f'<b style="color:{color}">{direction}</b> '
             f'<span style="color:{color}">{safe}</span>'
         )
+        if direction == 'TX':
+            self._indent_tx_line_right()
+
+    def _sync_log_tab_stop(self):
+        """TX 行聊天式右对齐的 RightTab 制表位，跟随日志视口宽度（变了才重设）。
+
+        QPlainTextEdit 的 plain 文档布局忽略块级对齐——QTextBlockFormat.setAlignment
+        与 div align="right" 都不渲染（QPlainTextDocumentLayout::layoutBlock 只认
+        defaultTextOption）。所以整行靠右用「文档级 RightTab 制表位 + TX 行行首
+        制表符」实现：制表位随每次块重排从 defaultTextOption 重新读取，追加、
+        maximumBlockCount 裁剪、滚动都不丢；只有含制表符的 TX 行受影响，
+        RX/SYS 行照常左对齐。窗口拉宽/缩窄后下一次同步（≤200ms）全体 TX 行重对齐。
+        """
+        stop = self.log.viewport().width() - 2 * self.log.document().documentMargin()
+        if stop <= 0 or stop == self._log_tab_stop_px:
+            return
+        self._log_tab_stop_px = stop
+        opt = QtGui.QTextOption(self.log.document().defaultTextOption())
+        tab = QtGui.QTextOption.Tab()
+        tab.position = float(stop)
+        tab.type = QtGui.QTextOption.TabType.RightTab
+        opt.setTabs([tab])
+        self.log.document().setDefaultTextOption(opt)
+
+    def _indent_tx_line_right(self):
+        """给刚落显的 TX 行行首插入制表符（appendHtml 会折叠 HTML 里的空白，
+        制表符必须走光标插入）。appendHtml 后光标停在本条 block 末尾。"""
+        cursor = self.log.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.MoveOperation.StartOfBlock)
+        cursor.insertText('\t')
 
     def clear_log(self):
         """清空记录：显示、条目、残行缓冲一并清（字节统计不清——那是连接周期的量）。"""

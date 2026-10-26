@@ -10,8 +10,8 @@ import json
 import re
 import urllib.request
 
-REPO_API_URL = 'https://api.github.com/repos/TZH-user/serialscope/releases/latest'
-RELEASES_PAGE = 'https://github.com/TZH-user/serialscope/releases/latest'
+REPO_API_URL = 'https://api.github.com/repos/TZH-user/liuscope/releases/latest'
+RELEASES_PAGE = 'https://github.com/TZH-user/liuscope/releases/latest'
 
 
 def get_version_tuple(version_text: str) -> tuple[int, int, int]:
@@ -51,7 +51,7 @@ def check_app_update(current_version: str, url: str = REPO_API_URL,
               'latest': '', 'page_url': RELEASES_PAGE, 'note': ''}
     try:
         req = urllib.request.Request(
-            url, headers={'User-Agent': 'serialscope-qt',
+            url, headers={'User-Agent': 'LiuScope',
                           'Accept': 'application/vnd.github+json'})
         opener_fn = opener or urllib.request.urlopen
         with opener_fn(req, timeout=timeout) as raw:

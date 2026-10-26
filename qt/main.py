@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""serialscope-qt 入口。
+"""LiuScope（柳镜）入口。
 
 运行：  python qt/main.py
 自测：  python qt/main.py --selftest   （离屏 QT_QPA_PLATFORM=offscreen 亦可跑）
@@ -11,12 +11,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from PySide6 import QtWidgets  # noqa: E402
 
-from ui.theme import DARK_QSS  # noqa: E402
+from ui import theme  # noqa: E402
 
 
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
-    app.setStyleSheet(DARK_QSS)
+    # 启动恢复主题（读设置键 ui/theme，缺省深色）：一处统一，MainWindow 内不再重复设置
+    theme.apply_saved_theme(app)
 
     from ui.main_window import MainWindow
     win = MainWindow()

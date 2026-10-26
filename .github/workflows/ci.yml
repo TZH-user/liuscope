@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  selftest:
+    name: 离屏自测（qt/selftest.py）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 安装依赖
+        run: pip install PySide6 pyqtgraph numpy pyserial
+      - name: 运行离屏自测
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python qt/selftest.py
+
+  build-exe:
+    name: 打包 liuscope.exe（仅 tag）
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    needs: selftest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 安装依赖
+        run: pip install PySide6 pyqtgraph numpy pyserial pyinstaller
+      - name: PyInstaller 单文件打包
+        run: python -m PyInstaller --noconfirm --onefile --windowed --paths qt --name liuscope qt/main.py
+      - name: 上传 exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: liuscope-exe
+          path: dist/liuscope.exe

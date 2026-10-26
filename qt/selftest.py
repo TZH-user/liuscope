@@ -808,9 +808,10 @@ def test_control_channel():
     assert not r['ok'] and r['error'] == '串口未连接。'
 
     # TCP 壳：连上后连续多行请求 → 逐行响应（离屏无事件循环，用 processEvents 泵）
+    # 注意 QApplication 必须先于 QTcpServer 创建（否则 standalone 跑本组时收不到响应）
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     channel = ControlChannel(api, port=0)
     assert channel.start()
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
 
     def pump_connect(sock, port):
         sock.connectToHost('127.0.0.1', port)
@@ -1246,17 +1247,28 @@ def test_wave_window():
     assert abs(wave.state.y_min - (y0 + 0.1 * (y1 - y0))) < 1e-6
     assert abs(wave.state.y_max - (y1 - 0.1 * (y1 - y0))) < 1e-6
 
-    # ---- 曲线填充开关（主线复刻：同色 alpha26 铺到绘图区底部） ----
-    assert wave.chk_fill.isChecked(), '默认开（主线口径）'
+    # ---- 曲线填充：设置键 wave/fill_under（工具行复选框已迁设置页，集成口径） ----
+    # 复选框不再在波形页上：开关走设置键 + apply_fill_from_setting()（设置页/AI 通道调用）
+    from core.settings import read_setting as _read_setting
+    from core.settings import write_setting as _write_setting
+    from ui.wave_window import FILL_SETTING_KEY
+    old_fill = _read_setting(FILL_SETTING_KEY, 'true')
+    assert not hasattr(wave, 'chk_fill'), '工具行不应再有「曲线填充」复选框'
+    _write_setting(FILL_SETTING_KEY, 'true')
+    wave.apply_fill_from_setting()
+    assert wave._fill_under is True, '设置 true → 填充开'
     wave.repaint_wave()
     c0 = wave._curves[0]
     assert c0.opts.get('fillLevel') is not None, '填充基线跟随绘图区底部'
     brush = c0._fill_brush
     assert brush is not None and brush.color().alpha() == 26, '同色 alpha=26'
-    wave.chk_fill.setChecked(False)
+    _write_setting(FILL_SETTING_KEY, 'false')
+    wave.apply_fill_from_setting()
+    assert wave._fill_under is False
     assert wave._curves[0]._fill_brush is None
     assert wave._curves[0].opts.get('fillLevel') is None
-    wave.chk_fill.setChecked(True)  # 还原默认
+    _write_setting(FILL_SETTING_KEY, old_fill)  # 还原设置键
+    wave.apply_fill_from_setting()
 
     win.close()
     print('WAVE WINDOW OK')
@@ -1677,6 +1689,1110 @@ def test_spectrum_panel():
     print('SPECTRUM PANEL OK')
 
 
+# ===================== 集成收口阶段新增组（自 _verify/*.py 有价值验证并入） =====================
+
+def _fake_worker_cls():
+    """替身串口线程类（信号面同 SerialWorker；start() 同步发 opened）。"""
+    from PySide6 import QtCore
+
+    class FakeWorker(QtCore.QObject):
+        got_bytes = QtCore.Signal(bytes)
+        opened = QtCore.Signal()
+        open_failed = QtCore.Signal(str)
+        lost = QtCore.Signal(str)
+
+        def __init__(self, device, baud, parent=None):
+            super().__init__(parent)
+            self.device, self.baud = device, baud
+
+        def start(self):
+            self.opened.emit()
+
+        def stop(self):
+            pass
+
+        def write_bytes(self, data):
+            return True
+
+    return FakeWorker
+
+
+def _snapshot_settings(keys):
+    from core.settings import read_setting
+    return {k: read_setting(k, '') for k in keys}
+
+
+def _restore_settings(snapshot):
+    """还原设置键（原值为空串时写空串，read_setting 视同缺省）。"""
+    from core.settings import write_setting
+    for key, value in snapshot.items():
+        write_setting(key, value)
+
+
+_CONNECT_KEYS = ('connect/port', 'connect/baud', 'connect/auto_link',
+                 'connect/rx_format', 'connect/tx_format', 'connect/newline')
+
+
+def test_connect_button_states():
+    """集成①：连接按钮状态化——手动开/关、连接丢失、打开失败、自动连接、程序性断开全路径同步。"""
+    from PySide6 import QtWidgets
+
+    import ui.main_window as mw
+
+    FakeWorker = _fake_worker_cls()
+    saved = _snapshot_settings(_CONNECT_KEYS)
+    old_worker_cls, old_scan = mw.SerialWorker, mw.scan_port_infos
+    mw.SerialWorker = FakeWorker
+    mw.scan_port_infos = lambda: [('COM3', '蓝牙链接上的标准串行 (COM3)'),
+                                  ('COM8', 'USB-SERIAL CH340 (COM8)')]
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = mw.MainWindow()
+    win.show()
+    win._port_watch_timer.stop()
+    try:
+        btn = win.btn_connect
+        assert btn.text() == '连接', btn.text()
+        btn.click()   # 手动连接（worker 建立 → 文案同步「断开」）
+        assert btn.text() == '断开' and win.lbl_status.text().startswith('已连接')
+        btn.click()   # 手动断开
+        assert btn.text() == '连接' and win.lbl_status.text() == '未连接'
+        btn.click()   # 连接丢失（worker.lost 路径）
+        assert btn.text() == '断开'
+        win.worker.lost.emit('拔出模拟')
+        assert btn.text() == '连接' and win.lbl_status.text().startswith('连接丢失')
+        btn.click()   # 打开失败（open_failed 路径也回「连接」）
+        assert btn.text() == '断开'
+        win.worker.open_failed.emit('端口被占用模拟')
+        assert btn.text() == '连接' and win.lbl_status.text().startswith('打开失败')
+        win.chk_auto_link.setChecked(True)   # 热插拔自动连接（新设备在基线外）
+        win._known_port_names = ['COM3']
+        win._port_watch_tick()
+        assert btn.text() == '断开' and win._connected_device == 'COM8'
+        win.chk_auto_link.setChecked(False)
+        win._teardown_worker()   # 程序性断开（closeEvent 同款路径）
+        assert btn.text() == '连接'
+        win.open_connection()    # open_connection 直调（自动连接内部路径）同样同步
+        assert btn.text() == '断开' and win.worker is not None
+        win._teardown_worker()
+        assert btn.text() == '连接'
+    finally:
+        mw.SerialWorker, mw.scan_port_infos = old_worker_cls, old_scan
+        win._port_watch_timer.stop()
+        win.close()
+        _restore_settings(saved)  # closeEvent 会回写 connect/*，这里还原
+    print('CONNECT BUTTON OK')
+
+
+def test_tx_alignment_and_hover():
+    """集成②/③：TX 行聊天式右对齐（制表位载体 + 像素右移 + 拉宽重对齐）
+    + 日志行悬停 HEX⇄文本互转（含 TX 制表行/空正文头行/0.4s 时序/离场复位）。"""
+    import re
+
+    from PySide6 import QtCore, QtGui, QtWidgets
+
+    import ui.main_window as mw
+    from ui import theme
+    from ui.log_hover import tooltip_for_position
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = mw.MainWindow()
+    win.show()
+    win.wave.state.enabled = False
+    win._port_watch_timer.stop()
+    win.chk_auto_save.setChecked(False)  # 像素检查阶段不掺自动日志节拍
+    theme.set_theme('dark')              # 统一深色基线（像素断言按深色日志底扫描）
+    app.processEvents()
+    try:
+        def find_block(needle):
+            b = win.log.document().firstBlock()
+            while b.isValid():
+                if needle in b.text():
+                    return b
+                b = b.next()
+            return None
+
+        def grab_span(block):
+            """log.grab() 扫该 block 首行 → 文本起点 min_x（与日志底色差>60 记为文本像素）。"""
+            cursor = QtGui.QTextCursor(block)
+            win.log.setTextCursor(cursor)
+            win.log.ensureCursorVisible()
+            app.processEvents()
+            img = win.log.grab().toImage()
+            vp = win.log.viewport()
+            vpo = vp.mapTo(win.log, QtCore.QPoint(0, 0))
+            bg = QtGui.QColor(theme.color('log_bg'))
+            r = win.log.cursorRect(cursor)
+            lo = None
+            for yy in range(max(vpo.y() + 2, int(vpo.y() + r.y()) + 2),
+                            max(vpo.y() + 3, int(vpo.y() + r.y() + r.height()) - 2)):
+                for xx in range(vpo.x() + 2, vpo.x() + vp.width() - 14):
+                    c = img.pixelColor(xx, yy)
+                    if (abs(c.red() - bg.red()) + abs(c.green() - bg.green())
+                            + abs(c.blue() - bg.blue())) > 60:
+                        lo = xx if lo is None else min(lo, xx)
+            return lo
+
+        # ---- TX 右对齐 ----
+        win.clear_log()
+        win._append_log('RX', 'RX-左对齐-0123456789')
+        win._append_log('TX', 'TX-右对齐')
+        win._append_log('SYS', 'SYS-系统行-0123456789')
+        app.processEvents()
+        rx_b, tx_b, sys_b = (find_block(t) for t in
+                             ('RX-左对齐-0123456789', 'TX-右对齐', 'SYS-系统行'))
+        assert all(b is not None for b in (rx_b, tx_b, sys_b))
+        assert tx_b.text().startswith('\t'), f'TX 行应以制表符开头: {tx_b.text()!r}'
+        assert not rx_b.text().startswith(('\t', ' ')) and not sys_b.text().startswith(('\t', ' '))
+        vw = win.log.viewport().width()
+        rx_x, tx_x = grab_span(rx_b), grab_span(tx_b)
+        assert rx_x is not None and rx_x < vw * 0.2, f'RX 行应靠左: {rx_x}/{vw}'
+        assert tx_x is not None and tx_x > vw * 0.5, f'TX 行应明显靠右: {tx_x}/{vw}'
+        assert (win.log.cursorRect(QtGui.QTextCursor(rx_b)).y()
+                < win.log.cursorRect(QtGui.QTextCursor(tx_b)).y()
+                < win.log.cursorRect(QtGui.QTextCursor(sys_b)).y()), '行序应保持追加顺序'
+        win.resize(1300, 620)   # 拉宽 → 制表位同步 → TX 行跟随新右缘
+        app.processEvents()
+        win._sync_log_tab_stop()
+        app.processEvents()
+        vw2 = win.log.viewport().width()
+        tx_x2 = grab_span(tx_b)
+        assert tx_x2 is not None and tx_x2 > vw2 * 0.5 and tx_x2 > tx_x, \
+            f'拉宽后 TX 行应重对齐: {tx_x} -> {tx_x2}'
+        rx_x2 = grab_span(rx_b)
+        assert rx_x2 is not None and rx_x2 < vw2 * 0.2, f'拉宽后 RX 行仍靠左: {rx_x2}'
+        win.resize(980, 620)
+        app.processEvents()
+        win._sync_log_tab_stop()
+        app.processEvents()
+
+        # ---- 悬停互转 ----
+        win.clear_log()
+        win._append_log('RX', '41 42 43 44')
+        win._append_log('RX', 'hello-ascii')
+        win._append_log('TX', 'ping-ok')
+        win._append_log('RX', '')            # 空正文条目（头行式，不能借下一条正文）
+        win._append_log('RX', 'after-empty')
+        hex_b = find_block('41 42 43 44')
+        ascii_b = find_block('hello-ascii')
+        tx_b2 = find_block('ping-ok')
+        empty_b = after_b = None
+        b = win.log.document().firstBlock()
+        while b.isValid():
+            t = b.text()
+            if empty_b is None and re.match(r'^\s*\[[^\]]+\] RX\s*$', t):
+                empty_b = b
+            if 'after-empty' in t:
+                after_b = b
+            b = b.next()
+        assert all(x is not None for x in (hex_b, ascii_b, tx_b2, empty_b, after_b))
+        tip_hex = tooltip_for_position(win.log, hex_b.blockNumber())
+        assert tip_hex.startswith('文本(UTF-8): ABCD') and '十进制: 65 66 67 68' in tip_hex
+        assert tooltip_for_position(win.log, ascii_b.blockNumber()) == \
+            'HEX: 68 65 6C 6C 6F 2D 61 73 63 69 69'
+        assert tooltip_for_position(win.log, tx_b2.blockNumber()) == 'HEX: 70 69 6E 67 2D 6F 6B', \
+            'TX 制表行也要能互转'
+        assert tooltip_for_position(win.log, empty_b.blockNumber()) == '', '空正文条目不给提示'
+        assert tooltip_for_position(win.log, after_b.blockNumber()).startswith('HEX: 61 66 74')
+        # 0.4s 悬停时序（offscreen 合成鼠标事件不经视口过滤器，直接驱动过滤分支执行体）
+        hover = win._log_hover
+        assert hover.HOVER_DELAY_MS == 400 and hover._timer.isSingleShot()
+        r = win.log.cursorRect(QtGui.QTextCursor(hex_b))
+        hover._on_move(QtCore.QPoint(int(r.x()) + 8, int(r.y() + r.height() / 2)))
+        assert hover._last_block == hex_b.blockNumber() and hover._timer.isActive()
+        assert hover._tooltip.startswith('文本(UTF-8)')
+        loop = QtCore.QEventLoop()
+        QtCore.QTimer.singleShot(450, loop.quit)
+        loop.exec()
+        assert not hover._timer.isActive() and hover._tooltip.startswith('文本(UTF-8)')
+        QtWidgets.QApplication.sendEvent(
+            win.log.viewport(), QtCore.QEvent(QtCore.QEvent.Type.Leave))
+        assert hover._last_block == -1 and not hover._timer.isActive(), '离场应复位悬停状态'
+    finally:
+        win.chk_auto_save.setChecked(True)
+        win._port_watch_timer.stop()
+        win.close()
+    print('TX ALIGN + HOVER OK')
+
+
+def test_wave_display_and_hover():
+    """集成④：显示点数改名（旧「窗口」文案移除）+ 工具行「导出」菜单
+    + 悬停十字线读数（首行 x + 每条可见曲线一行真实采样点，文字色=曲线色）。"""
+    from PySide6 import QtCore, QtGui, QtWidgets
+
+    from ui import theme
+    from ui.wave_window import CURVE_COLORS, WaveWindow
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    theme.set_theme('dark')
+    wave = WaveWindow()
+    wave.resize(1280, 800)
+    wave.show()
+    app.processEvents()
+    try:
+        labels = [l.text() for l in wave.findChildren(QtWidgets.QLabel)]
+        assert '显示点数' in labels, str(labels)
+        assert '窗口' not in labels, '旧「窗口」文案应已改名'
+        assert '点数' in wave.combo_window.toolTip(), wave.combo_window.toolTip()
+        assert not hasattr(wave, 'chk_fill'), '曲线填充复选框应已迁设置页'
+        assert wave.btn_export.text() == '导出'
+        assert [a.text() for a in wave.menu_export.actions()] == ['导出PNG', '导出CSV']
+        for _ in range(300):   # 模拟数据通路（真实解码管线）喂 300 帧
+            wave._on_sim_tick()
+        wave.repaint_wave()
+        app.processEvents()
+        st = wave.state
+        # ---- 悬停读数 ----
+        wave._hide_hover()
+        start, end, _follow = st.view_range()
+        x_probe = float(start) + 5.5      # 半帧偏移 → searchsorted 最近样本应为 start+5
+        vb = wave.plot.getViewBox()
+        y_mid = sum(vb.viewRange()[1]) / 2.0
+        scene = vb.mapViewToScene(QtCore.QPointF(x_probe, y_mid))
+        vpos = wave.plot.mapFromScene(scene)
+        if isinstance(vpos, QtCore.QPointF):
+            vpos = vpos.toPoint()
+        wave._update_hover(vpos)
+        assert wave._vline.isVisible() and wave._hline.isVisible() and wave._readout.isVisible()
+        lines = wave._readout.toPlainText().split('\n')
+        visible_n = sum(1 for c in range(len(wave._curves))
+                        if c >= len(st.enabled_channels) or st.enabled_channels[c])
+        assert len(lines) == 1 + visible_n, repr(wave._readout.toPlainText())
+        first = lines[0].strip()
+        assert first.startswith('x = ') and abs(float(first[4:]) - x_probe) < 0.51, first
+        assert all(lines[k + 1].startswith(st.channel_display_name(k) + ':')
+                   for k in range(visible_n)), str(lines)
+        expect_y0 = st.ch_values[0][start + 5]
+        got_y0 = float(lines[1].split(':', 1)[1])
+        assert abs(got_y0 - expect_y0) < 1e-9, f'y 应取真实采样点: {got_y0} vs {expect_y0}'
+        html = wave._readout.toHtml().lower()
+        assert all(c.lower() in html for c in CURVE_COLORS[:visible_n]), '读数文字色应为曲线色'
+        # MouseMove 事件经过滤器端到端
+        wave._hide_hover()
+        mmove = QtGui.QMouseEvent(
+            QtCore.QEvent.Type.MouseMove, QtCore.QPointF(vpos), QtCore.QPointF(vpos),
+            QtCore.Qt.MouseButton.NoButton, QtCore.Qt.MouseButton.NoButton,
+            QtCore.Qt.KeyboardModifier.NoModifier)
+        QtWidgets.QApplication.sendEvent(wave.plot.viewport(), mmove)
+        app.processEvents()
+        assert wave._readout.isVisible(), 'MouseMove 事件应经过滤器驱动读数框'
+        wave._hide_hover()
+    finally:
+        wave.stop_timers()
+        wave.close()
+    print('WAVE DISPLAY + HOVER OK')
+
+
+def test_xy_new_params():
+    """集成⑤：XY 新参数——分格/显示画法档位、渲染随参数变化、余晖拉伸迁移与回铺、格菜单中文。"""
+    from PySide6 import QtWidgets
+
+    import numpy as np
+
+    from core.wave_state import WaveState
+    from ui.xy_view import (CELL_SIZE, DIVS_OPTIONS, DRAW_MODES, PERSIST_OPTIONS,
+                            SPAN_OPTIONS, XYSection)
+
+    st = WaveState()
+    st.enabled = True
+    st.consume_bytes(b'1,2\n2,4\n3,6\n')  # FireWater 3 通道
+    sec = XYSection(st)
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    app.processEvents()
+
+    def img_arr(w):
+        img = w.grab().toImage()
+        return np.frombuffer(img.constBits(), dtype=np.uint8,
+                             count=img.sizeInBytes()).copy()
+
+    try:
+        # 档位
+        assert [sec.combo_count.itemText(i) for i in range(sec.combo_count.count())] == ['1', '2', '4']
+        assert [sec.combo_persist.itemText(i) for i in range(sec.combo_persist.count())] \
+            == list(PERSIST_OPTIONS)
+        assert [sec.combo_draw.itemText(i) for i in range(sec.combo_draw.count())] == list(DRAW_MODES)
+        assert list(DIVS_OPTIONS) == ['4', '5', '8', '10', '16']
+        assert list(SPAN_OPTIONS)[0] == '自适应'
+        # 回铺：进 XY（构造）立即有画面；改窗口数后新格同样回铺
+        assert sec._cells[0]._accum.any() and sec._last_total == 3
+        sec.combo_count.setCurrentText('4')
+        app.processEvents()
+        assert len(sec._cells) == 4 and sec._cells[2]._accum.any(), '窗口数 2→4 新格应回铺'
+        sec.combo_count.setCurrentText('2')
+        app.processEvents()
+        cell = sec._cells[0]
+        # 渲染随量程/源/分格/画法变化
+        sec._slot_span[0].setCurrentText('±8')
+        sec.tick()
+        app.processEvents()
+        a = img_arr(cell)
+        sec._slot_span[0].setCurrentText('±2')
+        sec.tick()
+        app.processEvents()
+        assert not np.array_equal(a, img_arr(cell)), '改量程后渲染应变化'
+        sec._slot_span[0].setCurrentText('±8')
+        sec.tick()
+        app.processEvents()
+        a = img_arr(cell)
+        sec._slot_y[0].setCurrentIndex(min(2, sec._slot_y[0].count() - 1))
+        st.consume_bytes(b'7,9\n3,1\n')
+        sec.tick()
+        app.processEvents()
+        assert not np.array_equal(a, img_arr(cell)), '改 Y 源通道后渲染应变化'
+        sec._slot_y[0].setCurrentIndex(1)
+        a = img_arr(cell)
+        sec._slot_divs[0].setCurrentText('4')
+        app.processEvents()
+        assert not np.array_equal(a, img_arr(cell)), '改分格数后渲染应变化'
+        sec._slot_divs[0].setCurrentText('8')
+        app.processEvents()
+        a = img_arr(cell)
+        sec.combo_draw.setCurrentText('点')
+        sec.tick()
+        app.processEvents()
+        assert not np.array_equal(a, img_arr(cell)), '画法 线→点 渲染应变化'
+        # 余晖拉伸迁移：±8 画点 → 切 ±4 → 轨迹不清空且绕中心拉伸到新位置
+        sec._slot_span[0].setCurrentText('±8')
+        cell.clear_pixels()
+        mid = CELL_SIZE // 2
+        cell.feed(np.array([2.0]), np.array([0.0]))
+        cell.tick(0.0)
+        assert cell._accum[mid, int(2.0 * (CELL_SIZE / 2 - 1) / 8 + mid)] == 1.0
+        sec._slot_span[0].setCurrentText('±4')
+        assert cell._accum.any(), '迁移不清空轨迹'
+        assert cell._accum[mid, int(2.0 * (CELL_SIZE / 2 - 1) / 4 + mid)] == 1.0, '应拉伸到新位置'
+        assert cell._last_span == 4.0
+        before = cell._accum.copy()
+        sec._slot_x[0].setCurrentIndex(1)   # 换源：量程未变=恒等迁移，轨迹保留
+        assert np.array_equal(cell._accum, before), '换源应保留轨迹'
+        # 自适应：挂起迁移等下一帧算出半幅
+        sec._slot_span[0].setCurrentText('自适应')
+        assert cell._migrate_from == 4.0
+        cell.feed(np.array([6.0]), np.array([0.0]))
+        cell.tick(0.05)
+        assert cell._migrate_from is None and cell._last_span == 8.0, '自适应半幅算出后应迁移'
+        # 格右键菜单全中文 + 恢复自动缩放/清除余晖动作
+        menu = sec._new_cell_menu(cell)
+        texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+        assert texts == ['恢复自动缩放', '导出PNG', '导出CSV', '显示网格', '清除余晖'], str(texts)
+        sec._slot_span[0].setCurrentText('±8')
+        next(a for a in menu.actions() if a.text() == '恢复自动缩放').trigger()
+        assert sec._slot_span[0].currentText() == '自适应' and cell.span_option == '自适应'
+        sec._slot_span[0].setCurrentText('±8')
+        next(a for a in menu.actions() if a.text() == '清除余晖').trigger()
+        assert not cell._accum.any(), '清除余晖应清空累积'
+    finally:
+        sec.stop()
+    print('XY NEW PARAMS OK')
+
+
+def test_spectrum_axis_sync_export():
+    """集成⑥：频谱/瀑布 x 轴双向联动 + 导出CSV 两模式与 N 钳制 + 清空复位。"""
+    import csv as csv_mod
+    import math
+    import os
+    import tempfile
+
+    from PySide6 import QtWidgets
+
+    from core.wave_state import WaveState
+    from ui.spectrum_panel import _ExportCsvDialog, SpectrumPanel
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    state = WaveState()
+    state.enabled = True
+    panel = SpectrumPanel(state)
+    panel.resize(1000, 720)
+    panel.show()
+    app.processEvents()
+    tmp = tempfile.mkdtemp(prefix='selftest_spectrum_')
+    clock = {'t': 1000.0}
+    sample = {'n': 0}
+    fs = 1000.0
+    panel._now_fn = lambda: clock['t']   # 假时钟：帧时间戳可控
+
+    def feed(dt=0.1, frames=100):
+        """喂一串单点帧（50Hz+120Hz 正弦）→ 推进假时钟 → 触发一次分析。"""
+        for _ in range(frames):
+            n = sample['n']
+            sample['n'] += 1
+            v = (math.sin(2 * math.pi * 50.0 * n / fs)
+                 + 0.3 * math.sin(2 * math.pi * 120.0 * n / fs))
+            state.append_frame([v])
+        clock['t'] += dt
+        panel.repaint_spectrum()
+        app.processEvents()
+
+    try:
+        for _ in range(30):
+            feed()
+        assert panel.last_analysis is not None and panel.last_analysis['used'] == 2048
+        assert 2.85 <= panel.acquisition_seconds <= 3.0, panel.acquisition_seconds
+        # ---- x 轴联动 ----
+        vb, wv = panel.plot.getViewBox(), panel.wf_plot.getViewBox()
+        (x0a, x1a), _ = vb.viewRange()
+        (x0b, x1b), _ = wv.viewRange()
+        fs_half = panel.last_analysis['fs'] / 2.0
+        assert abs(x1a - fs_half) < 1e-9, f'初始满量程 (0,{fs_half})，实际 x1={x1a}'
+        assert abs(x0a - x0b) < 1e-9 and abs(x1a - x1b) < 1e-9, '两图 x 范围应一致'
+        vb.setXRange(30.0, 80.0, padding=0)
+        (x0b, x1b), _ = wv.viewRange()
+        assert abs(x0b - 30) < 1e-9 and abs(x1b - 80) < 1e-9, '谱图改范围 → 瀑布跟随'
+        wv.setXRange(10.0, 60.0, padding=0)
+        (x0a, x1a), _ = vb.viewRange()
+        assert abs(x0a - 10) < 1e-9 and abs(x1a - 60) < 1e-9, '瀑布改范围 → 谱图跟随'
+        feed()
+        (x0a, x1a), _ = vb.viewRange()
+        assert abs(x0a - 10) < 1e-9 and abs(x1a - 60) < 1e-9, '例行重绘应保留用户缩放'
+        panel.edit_fs.setText('2000')
+        feed()
+        (x0a, x1a), _ = vb.viewRange()
+        (x0b, x1b), _ = wv.viewRange()
+        assert abs(x1a - 1000) < 1e-9 and abs(x1b - 1000) < 1e-9, 'fs=2000 → 重置回 (0,1000)'
+        panel.edit_fs.setText('1000')
+        feed()
+        (_x0, x1a), _ = vb.viewRange()
+        (_x0, x1b), _ = wv.viewRange()
+        assert abs(x1a - 500) < 1e-9 and abs(x1b - 500) < 1e-9, 'fs=1000 → 重置回 (0,500)'
+        for _ in range(10):
+            feed()   # fs 回 1000 后 key 变化清了导出历史，补帧再测导出
+        # ---- 导出CSV：latest + window（N 钳制） ----
+        latest_path = os.path.join(tmp, 'latest.csv')
+        meta = panel.export_csv(latest_path, mode='latest')
+        with open(latest_path, encoding='utf-8-sig') as f:
+            rows = list(csv_mod.reader(f))
+        assert rows[1] == ['频率Hz', 'dB'], str(rows[1])
+        assert len(rows) - 2 == meta['rows'] == 1024, f'{len(rows) - 2} vs {meta["rows"]}'
+        win_path = os.path.join(tmp, 'window.csv')
+        acq2 = panel.acquisition_seconds
+        meta2 = panel.export_csv(win_path, mode='window', seconds=999.0)
+        assert meta2['clamped'] and abs(meta2['seconds_eff'] - acq2) < 0.06, \
+            f"N=999 应钳制到采集时长: {meta2['seconds_eff']:.3f} vs {acq2:.3f}"
+        assert meta2['frames'] == len(panel._hist), '钳制后应覆盖全部历史帧'
+        assert '钳制' in meta2['note'], meta2['note']
+        with open(win_path, encoding='utf-8-sig') as f:
+            rows_w = list(csv_mod.reader(f))
+        assert rows_w[1] == ['时间s', '频率Hz', 'dB'], str(rows_w[1])
+        times = sorted({float(r[0]) for r in rows_w[2:]})
+        assert times and times[-1] - times[0] <= meta2['seconds_eff'] + 1e-6, '导出跨度 ≤ seconds_eff'
+        try:
+            panel.export_csv(os.path.join(tmp, 'bad.csv'), mode='nope')
+            assert False, '未知导出模式应抛 ValueError'
+        except ValueError:
+            pass
+        # 导出对话框逻辑（不 exec）
+        dlg = _ExportCsvDialog(panel)
+        dlg.radio_window.setChecked(True)
+        dlg.spin_seconds.setValue(999.0)
+        assert '钳制' in dlg.lbl_warn.text(), dlg.lbl_warn.text()
+        assert dlg.result_choice() == ('window', 999.0)
+        dlg.radio_latest.setChecked(True)
+        assert dlg.result_choice()[0] == 'latest'
+        # ---- 清空复位 ----
+        panel.clear_spectrum()
+        state.reset_buffers()   # 模拟数据源停止（波形页「清空」语义），此后不再有数据
+        app.processEvents()
+        assert panel._max_hold is None and panel._avg_db is None
+        assert panel._waterfall == [] and panel._hist == []
+        assert panel.acquisition_seconds == 0.0 and panel.last_analysis is None
+        assert '已清空' in panel.lbl_info.text()
+        for _ in range(3):   # 无新数据：清空提示不被例行重绘冲掉
+            panel.repaint_spectrum()
+            app.processEvents()
+        assert '已清空' in panel.lbl_info.text() and panel._waterfall == []
+        for _ in range(3):   # 数据恢复 → 提示让位，采集重新累计
+            feed()
+        assert panel.acquisition_seconds > 0 and '已清空' not in panel.lbl_info.text()
+    finally:
+        panel.stop_timers()
+        panel.close()
+    print('SPECTRUM AXIS + EXPORT OK')
+
+
+def test_theme_switching():
+    """集成⑦：主题切换全局生效（设置页下拉 → 全局 QSS/绘图区/曲线/芯片边框 + ini 记忆 + 重启保持）。"""
+    from PySide6 import QtWidgets
+
+    import ui.main_window as mw
+    from core import APP_NAME, APP_VERSION
+    from core.settings import read_setting, write_setting
+    from ui import theme
+    from ui.theme import DARK_QSS, LIGHT_QSS
+
+    saved = _snapshot_settings(('ui/theme', 'connect/port'))
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = mw.MainWindow()
+    win.show()
+    win._port_watch_timer.stop()
+    try:
+        # 统一深色基线：模块与下拉都归位（ini 可能残留 light；下拉已在 light 时
+        # setCurrentIndex(light) 是无操作不发信号，所以先显式归位下拉）
+        combo = win.settings_page.combo_theme
+        if combo.currentData() != 'dark':
+            combo.setCurrentIndex(combo.findData('dark'))
+            app.processEvents()
+        theme.set_theme('dark')
+        app.processEvents()
+        win.wave.state.consume_bytes(b'1,2\n2,4\n3,6\n')   # 喂几帧：让曲线与 CH 芯片建出来
+        win.wave.repaint_wave()
+        app.processEvents()
+        tabs = win.tabs
+        texts = [tabs.tabText(i) for i in range(tabs.count())]
+
+        def luma_all():
+            """七个页签各自的渲染平均亮度。"""
+            out = {}
+            for i, name in enumerate(texts):
+                tabs.setCurrentIndex(i)
+                app.processEvents()
+                img = tabs.widget(i).grab().toImage()
+                total = n = 0
+                for y in range(0, img.height(), 4):
+                    for x in range(0, img.width(), 4):
+                        c = img.pixelColor(x, y)
+                        total += (c.red() * 299 + c.green() * 587 + c.blue() * 114) // 1000
+                        n += 1
+                out[name] = total / max(1, n)
+            return out
+
+        dark_base = luma_all()
+        combo.setCurrentIndex(combo.findData('light'))
+        app.processEvents()
+        assert theme.current_theme() == 'light' and app.styleSheet() == LIGHT_QSS
+        assert read_setting('ui/theme', '') == 'light', '主题应写入设置记忆'
+        light_mean = luma_all()
+        for name in texts:
+            assert light_mean[name] - dark_base[name] > 20.0, f'「{name}」页应变亮'
+        assert win.wave.plot.backgroundBrush().color().name() == \
+            theme.color('plot_bg', 'light').lower()
+        assert win.spectrum.plot.backgroundBrush().color().name() == \
+            theme.color('plot_bg', 'light').lower()
+        assert win.wave._curve_colors == theme.curve_colors('light')
+        assert win.spectrum._trace.opts['pen'].color().name() == \
+            theme.color('sp_trace', 'light').lower()
+        assert theme.color('chip_border', 'light') in win.wave._chips[0].styleSheet()
+        combo.setCurrentIndex(combo.findData('dark'))
+        app.processEvents()
+        assert theme.current_theme() == 'dark' and app.styleSheet() == DARK_QSS
+        dark_back = luma_all()
+        assert max(abs(dark_back[k] - dark_base[k]) for k in dark_base) <= 8.0, '切回深色应恢复'
+        # 重启保持：写 ini → 全新实例启动即浅色
+        write_setting('ui/theme', 'light')
+        win2 = mw.MainWindow()
+        try:
+            win2._port_watch_timer.stop()
+            app.processEvents()
+            assert theme.current_theme() == 'light' and app.styleSheet() == LIGHT_QSS
+            assert win2.wave.plot.backgroundBrush().color().name() == \
+                theme.color('plot_bg', 'light').lower()
+            assert [win2.tabs.tabText(i) for i in range(win2.tabs.count())] == texts
+        finally:
+            win2._port_watch_timer.stop()
+            win2.close()
+        # 关于页签内容（版本只读 core，作者/许可证/简介在）
+        tabs.setCurrentIndex(texts.index('关于'))
+        app.processEvents()
+        about_text = '\n'.join(l.text() for l in win.about_page.findChildren(QtWidgets.QLabel))
+        assert APP_NAME in about_text and APP_VERSION in about_text, about_text
+        assert '折柳' in about_text and 'GPL-3.0' in about_text
+    finally:
+        theme.set_theme('dark')
+        win._port_watch_timer.stop()
+        win.close()
+        _restore_settings(saved)
+    print('THEME SWITCH OK')
+
+
+def test_ai_channel_extended():
+    """集成⑧：AI 控制通道——help 结构化命令表 / spectrum_snapshot 合法数组 /
+    settings_set UI 同步（含中文别名与已连接拒绝）/ Modbus 事务后同一连接仍存活。"""
+    import json
+    import time
+
+    from PySide6 import QtWidgets
+    from PySide6.QtNetwork import QTcpSocket
+
+    import core.ports as core_ports
+    import ui.main_window as mw
+    import ui.theme as theme_mod
+    from core.settings import read_setting
+
+    FakeWorker = _fake_worker_cls()
+    saved = _snapshot_settings(('connect/baud', 'connect/port', 'ui/theme', 'wave/fill_under'))
+    old_worker_cls, old_scan = mw.SerialWorker, mw.scan_port_infos
+    old_ports_scan = core_ports.scan_port_infos
+    mw.SerialWorker = FakeWorker
+    fake_ports = [('COM3', '蓝牙链接上的标准串行 (COM3)'), ('COM8', 'USB-SERIAL CH340 (COM8)')]
+    mw.scan_port_infos = lambda: fake_ports
+    core_ports.scan_port_infos = lambda: fake_ports  # 控制通道闭包构建时从 core.ports 取
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = mw.MainWindow()
+    win.show()
+    win._port_watch_timer.stop()
+    if not win._control_channel.listening:  # 9101 被外部占用时兜底临时端口
+        win._control_channel.stop()
+        win._control_channel._port = 0
+        assert win._control_channel.start()
+    sock = QTcpSocket()
+
+    def pump_until(cond, timeout_s=6.0):
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            app.processEvents()
+            if cond():
+                return True
+            time.sleep(0.005)
+        app.processEvents()
+        return bool(cond())
+
+    def rpc(request):
+        sock.write((json.dumps(request, ensure_ascii=False) + '\n').encode('utf-8'))
+        data = b''
+        deadline = time.time() + 5.0
+        while data.count(b'\n') < 1 and time.time() < deadline:
+            app.processEvents()
+            data += bytes(sock.readAll())
+            if data.count(b'\n') < 1:
+                sock.waitForReadyRead(20)
+        line = data.split(b'\n')[0]
+        return json.loads(line) if line.strip() else {}
+
+    try:
+        sock.connectToHost('127.0.0.1', win._control_channel.port)
+        assert pump_until(lambda: sock.state() == QTcpSocket.SocketState.ConnectedState, 5.0)
+        # ---- help：结构化命令表 + follow 语义块 ----
+        r = rpc({'cmd': 'help'})
+        cmds = {c['cmd'] for c in r.get('commands', [])}
+        assert {'spectrum_snapshot', 'xy_snapshot', 'modbus_recent', 'stm32_status',
+                'settings_list', 'settings_get', 'settings_set', 'stop'} <= cmds, str(cmds)
+        assert all(isinstance(c.get('params'), dict) and c.get('desc')
+                   and isinstance(c.get('example'), dict) for c in r.get('commands', []))
+        fs_block = r.get('follow_semantics')
+        assert isinstance(fs_block, dict) and fs_block.get('default_interval_s') == 0.5 \
+            and fs_block.get('default_max_lines') == 200 and 'stop' in fs_block.get('exit', '')
+        r = rpc({'cmd': 'nope'})
+        assert not r.get('ok') and '未知命令' in r.get('error', '') and 'help' in r.get('error', '')
+        # ---- spectrum_snapshot（模拟数据 → 合法数组） ----
+        win.wave.state.consume_bytes(b'1.5,2.5,0.3\n' * 600)
+        assert pump_until(lambda: win.spectrum.last_analysis is not None
+                          and win.spectrum.last_analysis['db'].size >= 64, 8.0)
+        r = rpc({'cmd': 'spectrum_snapshot', 'count': 64})
+        assert r.get('ok') and r.get('empty') is False, str(r)[:120]
+        assert len(r['freqs_hz']) == 64 and len(r['db']) == 64
+        p = r['params']
+        assert p['fft_points'] > 0 and p['sample_rate_hz'] > 0 \
+            and p['window'] == '汉宁窗' and p['rbw_enbw_hz'] > 0
+        assert len(r['waterfall_latest']) == 64
+        assert all(isinstance(t, list) and len(t) == 3
+                   and all(isinstance(x, int) and 0 <= x <= 255 for x in t)
+                   for t in r['waterfall_latest']), '瀑布最近帧应为每频点 RGB 三元组'
+        full = rpc({'cmd': 'spectrum_snapshot'})
+        assert full['total_bins'] == len(full['freqs_hz']) == len(full['db'])
+        assert full['freq_start_hz'] == 0.0
+        freqs = full['freqs_hz']
+        assert all(freqs[i] < freqs[i + 1] for i in range(len(freqs) - 1)), '频率轴应严格递增'
+        # ---- settings_set：UI 同步 / 别名 / 已连接拒绝 / 只读键 ----
+        r = rpc({'cmd': 'settings_set', 'key': 'baud', 'value': 921600})
+        app.processEvents()
+        assert r.get('ok') and r.get('after') == '921600', str(r)
+        assert win.combo_baud.currentText() == '921600'
+        assert read_setting('connect/baud') == '921600'
+        win.btn_connect.click()
+        assert pump_until(lambda: win.worker is not None)
+        r = rpc({'cmd': 'settings_set', 'key': 'baud', 'value': 115200})
+        assert not r.get('ok') and '断开' in r.get('error', ''), '已连接改波特率应拒绝'
+        r = rpc({'cmd': 'settings_set', 'key': 'port', 'value': 921600})
+        assert not r.get('ok') and '断开' in r.get('error', ''), '已连接改串口应拒绝'
+        win.btn_connect.click()
+        assert pump_until(lambda: win.worker is None)
+        r = rpc({'cmd': 'settings_set', 'key': '波特率', 'value': 115200})
+        app.processEvents()
+        assert r.get('ok') and win.combo_baud.currentText() == '115200', '中文别名应可用'
+        r = rpc({'cmd': 'settings_set', 'key': 'theme', 'value': 'light'})
+        app.processEvents()
+        assert r.get('ok') and theme_mod.current_theme() == 'light' \
+            and win.settings_page.combo_theme.currentData() == 'light'
+        r = rpc({'cmd': 'settings_set', 'key': 'theme', 'value': 'dark'})
+        app.processEvents()
+        assert r.get('ok') and theme_mod.current_theme() == 'dark'
+        r = rpc({'cmd': 'settings_set', 'key': 'points', 'value': 2500})
+        app.processEvents()
+        assert r.get('ok') and win.wave.combo_window.currentText() == '2500' \
+            and win.wave.state.window_frames == 2500, '显示点数改后下拉与内部状态应一致'
+        r = rpc({'cmd': 'settings_set', 'key': 'fill', 'value': False})
+        app.processEvents()
+        assert r.get('ok') and win.settings_page.chk_fill.isChecked() is False \
+            and read_setting('wave/fill_under') == 'false' and win.wave._fill_under is False, \
+            '填充关：复选框+设置键+波形页三者应一致'
+        r = rpc({'cmd': 'settings_set', 'key': '曲线填充', 'value': 'true'})
+        app.processEvents()
+        assert r.get('ok') and win.wave._fill_under is True
+        r = rpc({'cmd': 'settings_set', 'key': 'paused', 'value': True})
+        app.processEvents()
+        assert r.get('ok') and win.wave.btn_pause.isChecked() \
+            and win.wave.btn_pause.text() == '继续' and win.wave.state.paused is True
+        r = rpc({'cmd': 'settings_set', 'key': 'paused', 'value': False})
+        app.processEvents()
+        assert r.get('ok') and win.wave.state.paused is False
+        r = rpc({'cmd': 'settings_list'})
+        assert r.get('ok') and all(k in r['settings'] for k in
+                                   ('baud', 'port', 'protocol', 'theme', 'points', 'fill', 'paused'))
+        r = rpc({'cmd': 'settings_get', 'key': '波特率'})
+        assert r.get('ok') and r.get('value') == '115200'
+        r = rpc({'cmd': 'settings_set', 'key': 'filter', 'value': 'x'})
+        assert not r.get('ok'), '只读键应拒绝写'
+        # ---- Modbus 与 AI 通道共存（poll.stop() 修复回归：嵌套事件循环后同连接仍存活） ----
+        win.btn_connect.click()
+        assert pump_until(lambda: win.worker is not None)
+        resp = win.modbus_transport(bytes.fromhex('010300000002'), timeout_ms=60)
+        assert resp == b'', '无从站应超时返回空响应'
+        r = rpc({'cmd': 'ping'})
+        assert r.get('ok'), f'Modbus 事务后同一条 AI 连接必须仍能响应: {r}'
+        win.btn_connect.click()
+        assert pump_until(lambda: win.worker is None)
+    finally:
+        mw.SerialWorker, mw.scan_port_infos = old_worker_cls, old_scan
+        core_ports.scan_port_infos = old_ports_scan
+        sock.close()
+        win._port_watch_timer.stop()
+        win.close()
+        _restore_settings(saved)
+        theme_mod.set_theme('dark')
+    print('AI CHANNEL EXTENDED OK')
+
+
+def test_stm32_fake_cli():
+    """集成⑨：STM32 假 CLI 状态机——探测/连接芯片信息/断开/hex+bin 烧录（带校验与基址）/
+    OB 读取/软硬复位/全片擦除与读保护解除（危险确认）/连接失败与无探针/无 CLI 提示。"""
+    import os
+    import sys
+    import tempfile
+    import time
+
+    from PySide6 import QtWidgets
+
+    import core.stm32_cli as cli_mod
+    import ui.main_window as mw
+    from core.settings import read_setting, write_setting
+    from core.stm32_cli import Stm32Cli
+    from ui.settings_page import STM32_CLI_PATH_KEY
+
+    tmp = tempfile.mkdtemp(prefix='selftest_stm32_')
+    fake_sn = 'FAKE00112233445566'
+    fake_py = os.path.join(tmp, 'fake_stm32_cli.py')
+    fake_bat = os.path.join(tmp, 'fake_stm32_cli.bat')
+    # 假 CLI：按 argv/环境变量 STM32_FAKE_MODE 输出真实格式样本（ok/no_probe/no_connect）
+    FAKE_SOURCE = r"""
+# -*- coding: utf-8 -*-
+import os
+import sys
+import time
+
+args = sys.argv[1:]
+mode = os.environ.get('STM32_FAKE_MODE', 'ok')
+
+L_OK = '''===== STLink Interface =====
+
+-------- Connected ST-LINK Probes List --------
+
+ST-Link Probe 0 :
+   ST-LINK SN  : FAKE00112233445566
+   ST-LINK FW  : V2J46S7
+   Access Port Number  : 3
+   Board Name  : NUCLEO-H743ZI
+-----------------------------------------------
+'''
+
+CONNECT_OK = '''Fake STM32CubeProgrammer v2.23.0
+Voltage     : 3.27V
+Device ID   : 0x450
+Device name : STM32H7xx
+NVM size    : 2 MBytes
+Device CPU  : Cortex-M7'''
+
+OB_OK = '''OPTION BYTES BANK: 0
+   Read Out Protection:
+     RDP          : 0xAA (Level 0, no protection)'''
+
+DOWNLOAD_OK = '''File download complete
+Download verified successfully'''
+
+if mode == 'slow':
+    time.sleep(30)
+    sys.exit(0)
+if '-l' in args:
+    if mode == 'no_probe':
+        print('Fake STM32CubeProgrammer v2.23.0\nNo ST-Link probe detected.')
+        sys.exit(0)
+    print('Fake STM32CubeProgrammer v2.23.0')
+    print(L_OK)
+    sys.exit(0)
+if '-c' in args:
+    print('ARGS: ' + ' '.join(args))
+    if mode == 'no_connect':
+        print('Error: No ST-LINK detected!')
+        sys.exit(1)
+    print(CONNECT_OK)
+    if '-ob' in args:
+        print(OB_OK)
+    if '-rdu' in args:
+        print('Read Protection is removed')
+    if '-e' in args and 'all' in args:
+        print('Mass erase successfully triggered')
+    if '-rst' in args:
+        print('System reset is performed')
+    if '-hardRst' in args:
+        print('Hardware reset is performed')
+    if '-d' in args or '-w' in args:
+        print(DOWNLOAD_OK)
+    sys.exit(0)
+print('Fake CLI: nothing to do')
+sys.exit(0)
+"""
+    with open(fake_py, 'w', encoding='utf-8') as f:
+        f.write(FAKE_SOURCE)
+    with open(fake_bat, 'w', encoding='utf-8') as f:
+        f.write(f'@echo off\r\n"{sys.executable}" "%~dp0fake_stm32_cli.py" %*\r\n')
+    hex_path = os.path.join(tmp, 'fw_test.hex')
+    with open(hex_path, 'wb') as f:
+        f.write(b':00000001FF\r\n')
+    bin_path = os.path.join(tmp, 'fw_test.bin')
+    with open(bin_path, 'wb') as f:
+        f.write(b'\x00' * 256)
+
+    saved = _snapshot_settings((STM32_CLI_PATH_KEY, *_CONNECT_KEYS, 'update/last_check'))
+    write_setting(STM32_CLI_PATH_KEY, fake_bat)
+    write_setting('update/last_check', str(time.time()))  # 屏蔽 3s 自动更新检查
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+
+    # 模态对话框护栏（收尾必须还原，后续组还要跑）
+    dialogs = {'question': [], 'warning': []}
+    answer = {'value': QtWidgets.QMessageBox.StandardButton.No}
+    file_pick = {'path': ''}
+    real_question = QtWidgets.QMessageBox.question
+    real_warning = QtWidgets.QMessageBox.warning
+    real_open_file = QtWidgets.QFileDialog.getOpenFileName
+
+    def fake_question(parent, title, text, *a, **k):
+        dialogs['question'].append((title, text))
+        return answer['value']
+
+    def fake_warning(parent, title, text, *a, **k):
+        dialogs['warning'].append((title, text))
+        return QtWidgets.QMessageBox.StandardButton.Ok
+
+    QtWidgets.QMessageBox.question = staticmethod(fake_question)
+    QtWidgets.QMessageBox.warning = staticmethod(fake_warning)
+    QtWidgets.QFileDialog.getOpenFileName = staticmethod(
+        lambda *a, **k: (file_pick.get('path', ''), ''))
+
+    def wait_idle(runner, timeout_ms=15000):
+        deadline = time.time() + timeout_ms / 1000
+        while time.time() < deadline:
+            app.processEvents()
+            if not runner.is_busy():
+                app.processEvents()
+                return True
+            time.sleep(0.01)
+        return False
+
+    win = mw.MainWindow()
+    win.show()
+    win._port_watch_timer.stop()
+    try:
+        app.processEvents()
+        titles = [win.tabs.tabText(i) for i in range(win.tabs.count())]
+        assert titles == ['终端', '波形', '频谱', 'Modbus', 'STM32', '设置', '关于'], str(titles)
+        panel = win.stm32
+        assert panel.runner.cli_path == fake_bat, panel.runner.cli_path
+        assert not panel.runner.is_busy() and '未探测' in panel.lbl_probe.text()
+        # ---- 探测 ----
+        panel.refresh_all()
+        assert panel.runner.is_busy()
+        assert wait_idle(panel.runner)
+        assert len(panel.probes) == 1 and panel.probes[0]['sn'] == fake_sn, str(panel.probes)
+        assert panel.combo_probe.count() == 1 and fake_sn in panel.combo_probe.itemText(0)
+        assert '已检测到 1 个' in panel.lbl_probe.text() and panel.lbl_probe.objectName() == 'status_ok'
+        assert 'Fake STM32CubeProgrammer' in panel.cli_log.toPlainText()
+        assert any('[STM32]' in e['text'] and 'ST-LINK 探测完成' in e['text']
+                   for e in win.message_entries), '探测事件应镜像进主日志'
+        # ---- 连接 / 断开 ----
+        panel.toggle_connect()
+        assert wait_idle(panel.runner)
+        assert panel.connected and panel.btn_connect.text() == '断开'
+        assert '已连接 STM32H7xx' in panel.lbl_target.text()
+        info_text = panel.info_box.toPlainText()
+        assert all(s in info_text for s in ('STM32H7xx', '2 MBytes', 'Cortex-M7', '3.27V', '0x450'))
+        panel.toggle_connect()
+        assert not panel.connected and panel.btn_connect.text() == '连接目标'
+        assert panel.lbl_target.text() == '目标: 未连接'
+        # ---- hex 烧录（带校验）与 bin 基址 ----
+        file_pick['path'] = hex_path
+        panel.pick_file()
+        assert panel.lbl_file.text() == hex_path and not panel.edit_addr.isEnabled()
+        panel.run_flash()
+        assert wait_idle(panel.runner)
+        log_text = panel.cli_log.toPlainText()
+        assert 'Download verified successfully' in log_text and '[SYS] 烧录完成。' in log_text
+        file_pick['path'] = bin_path
+        panel.pick_file()
+        assert panel.edit_addr.isEnabled()
+        panel.edit_addr.setText('0x0800C000')
+        panel.run_flash()
+        assert wait_idle(panel.runner)
+        log_text = panel.cli_log.toPlainText()
+        assert '-w' in log_text and '0x0800C000' in log_text and '[SYS] 烧录完成。' in log_text
+        file_pick['path'] = bin_path
+        panel.pick_file()
+        panel.edit_addr.setText('不是地址')
+        mark = panel.cli_log.toPlainText()
+        panel.run_flash()
+        app.processEvents()
+        assert dialogs['warning'] and '基址无效' in dialogs['warning'][-1][1]
+        assert panel.cli_log.toPlainText() == mark, '基址非法不应发 CLI'
+        panel.edit_addr.setText('0x08000000')
+        # ---- OB / 软硬复位 ----
+        panel.run_option_bytes()
+        assert wait_idle(panel.runner)
+        assert 'OB 读取完成：RDP 0xAA（Level 0' in panel.cli_log.toPlainText()
+        panel.run_reset(hard=False)
+        assert wait_idle(panel.runner)
+        assert '[SYS] 软复位完成。' in panel.cli_log.toPlainText()
+        panel.run_reset(hard=True)
+        assert wait_idle(panel.runner)
+        assert '[SYS] 硬复位完成。' in panel.cli_log.toPlainText()
+        # ---- 危险确认：拒绝不执行，确认后执行 ----
+        answer['value'] = QtWidgets.QMessageBox.StandardButton.No
+        mark = panel.cli_log.toPlainText()
+        panel.run_erase()
+        app.processEvents()
+        assert panel.cli_log.toPlainText() == mark, '拒绝确认不应执行擦除'
+        panel.run_rdu()
+        app.processEvents()
+        assert panel.cli_log.toPlainText() == mark, '拒绝确认不应执行读保护解除'
+        answer['value'] = QtWidgets.QMessageBox.StandardButton.Yes
+        panel.run_erase()
+        assert wait_idle(panel.runner)
+        assert '[SYS] 全片擦除完成。' in panel.cli_log.toPlainText() and '-e' in panel.cli_log.toPlainText()
+        assert dialogs['question'] and '不可恢复' in dialogs['question'][-1][1], '确认框应带危险提示'
+        panel.run_rdu()
+        assert wait_idle(panel.runner)
+        assert '[SYS] 读保护解除完成。' in panel.cli_log.toPlainText()
+        # ---- 失败态 ----
+        panel.runner.extra_env = {'STM32_FAKE_MODE': 'no_connect'}
+        panel.toggle_connect()
+        assert wait_idle(panel.runner)
+        assert not panel.connected and '连接失败' in panel.lbl_target.text()
+        assert 'Error: No ST-LINK detected!' in panel.cli_log.toPlainText()
+        panel.runner.extra_env = {'STM32_FAKE_MODE': 'no_probe'}
+        panel.refresh_all()
+        assert wait_idle(panel.runner)
+        assert '未检测到 ST-LINK' in panel.lbl_probe.text() and panel.combo_probe.count() == 0
+        panel.runner.extra_env = {}
+        # ---- 无 CLI / 路径失效（不崩，中文提示，按钮禁用） ----
+        win.close()
+        app.processEvents()
+        real_which, real_cands, real_fixed = cli_mod.shutil.which, cli_mod._probe_candidates, cli_mod._c_st_fixed
+        cli_mod.shutil.which = lambda name: None
+        cli_mod._probe_candidates = lambda: []
+        cli_mod._c_st_fixed = lambda: ''
+        try:
+            write_setting(STM32_CLI_PATH_KEY, '')
+            panel._apply_cli_path()
+            assert panel.lbl_cli.text() == 'CLI: 未找到' and panel.lbl_cli.objectName() == 'status_err'
+            assert all(not btn.isEnabled() for btn in panel.op_buttons)
+            dialogs['warning'].clear()
+            panel.run_flash()
+            app.processEvents()
+            assert any('未找到 STM32CubeProgrammer CLI' in t for _t, t in dialogs['warning'])
+            assert not panel.runner.is_busy()
+            write_setting(STM32_CLI_PATH_KEY, r'Z:\no_such_dir\STM32_Programmer_CLI.exe')
+            panel._apply_cli_path()
+            assert '设置的路径不存在' in panel.lbl_cli.text()
+        finally:
+            cli_mod.shutil.which, cli_mod._probe_candidates, cli_mod._c_st_fixed = \
+                real_which, real_cands, real_fixed
+    finally:
+        QtWidgets.QMessageBox.question = real_question
+        QtWidgets.QMessageBox.warning = real_warning
+        QtWidgets.QFileDialog.getOpenFileName = real_open_file
+        win._port_watch_timer.stop()
+        win.close()
+        _restore_settings(saved)
+    # core 级：忙碌拒绝 + 超时强杀（借 python -c 造慢任务，不依赖假 CLI）
+    slow_runner = Stm32Cli()
+    slow_runner.cli_path = sys.executable
+    result = {}
+    slow_runner.finished.connect(lambda p: result.update(p))
+    try:
+        assert slow_runner.run('flash', ['-c', 'import time; time.sleep(5)'], 600)
+        assert slow_runner.run('list', ['-l'], 30000) is False, '忙碌中并发请求应被拒绝'
+        t0 = time.time()
+        deadline = time.time() + 4.0
+        while time.time() < deadline and slow_runner.is_busy():
+            app.processEvents()
+            time.sleep(0.01)
+        assert not slow_runner.is_busy() and time.time() - t0 < 4.5, '超时应强杀且早于任务自然结束'
+        assert result.get('timed_out') is True and '超时' in result.get('error', ''), str(result)
+    finally:
+        slow_runner.shutdown()
+    print('STM32 FAKE CLI OK')
+
+
+def test_main_tabs_integration():
+    """集成⑩（任务 1 口径）：主窗 offscreen 完整跑一遍——七页签建/切、模拟数据下
+    波形/频谱/XY 正常（XY 回铺立即有画面）、AI 控制通道随主窗开启。"""
+    import time as _time
+
+    from PySide6 import QtWidgets
+
+    import ui.main_window as mw
+    from core.settings import write_setting
+
+    saved = _snapshot_settings(('ui/theme', 'wave/fill_under', *_CONNECT_KEYS,
+                                'update/last_check'))
+    write_setting('update/last_check', str(_time.time()))  # 屏蔽 3s 自动更新检查
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = mw.MainWindow()
+    win.show()
+    win._port_watch_timer.stop()
+    try:
+        app.processEvents()
+        texts = [win.tabs.tabText(i) for i in range(win.tabs.count())]
+        assert texts == ['终端', '波形', '频谱', 'Modbus', 'STM32', '设置', '关于'], str(texts)
+        for i, name in enumerate(texts):   # 逐页签切换 + 渲染非空
+            win.tabs.setCurrentIndex(i)
+            app.processEvents()
+            pix = win.tabs.widget(i).grab()
+            assert not pix.isNull() and pix.width() > 50 and pix.height() > 50, name
+        # 模拟数据：波形 → 频谱 → XY（回铺立即有画面）
+        win.wave.btn_sim.setChecked(True)
+        deadline = _time.time() + 8.0
+        while _time.time() < deadline and win.wave.state.frame_count < 30:
+            app.processEvents()
+            _time.sleep(0.005)
+        assert win.wave.state.frame_count >= 30, '模拟数据应流入波形缓冲'
+        deadline = _time.time() + 8.0
+        while _time.time() < deadline and win.spectrum.last_analysis is None:
+            app.processEvents()
+            _time.sleep(0.005)
+        assert win.spectrum.last_analysis is not None, '频谱页应分析出有效谱'
+        win.wave.btn_xy.setChecked(True)
+        app.processEvents()
+        assert win.wave.xy_section.isVisibleTo(win.wave)
+        assert all(c._accum.any() for c in win.wave.xy_section._cells), 'XY 回铺应立即有画面'
+        win.wave.btn_xy.setChecked(False)
+        win.wave.btn_sim.setChecked(False)
+        app.processEvents()
+        assert win._control_channel.listening, 'AI 控制通道应随主窗默认开启'
+        status = win._control_api.status()
+        assert status.get('protocol') == 'FireWater' and status.get('channels', 0) >= 3
+    finally:
+        win._port_watch_timer.stop()
+        win.close()
+        _restore_settings(saved)
+    print('MAIN TABS INTEGRATION OK')
+
+
 def run_selftest() -> int:
     import os
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -1704,6 +2820,16 @@ def run_selftest() -> int:
     test_update_ui()
     test_spectrum_dsp()
     test_spectrum_panel()
+    # ---- 集成收口阶段新增组（自 _verify/*.py 有价值验证并入）----
+    test_connect_button_states()
+    test_tx_alignment_and_hover()
+    test_wave_display_and_hover()
+    test_xy_new_params()
+    test_spectrum_axis_sync_export()
+    test_theme_switching()
+    test_ai_channel_extended()
+    test_stm32_fake_cli()
+    test_main_tabs_integration()
     print('QT_SPIKE_SELFTEST_OK')
     return 0
 

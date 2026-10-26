@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """日志区行悬停 HEX⇄文本互转提示（对齐主线：悬停 0.4s 弹出，行变化才重算）。
 
-主窗体日志一条目占一个 block：'[时间] 方向 正文'。悬停时取该 block 正文
-做格式互转；头行式两条目（方向后无正文）则取下一个 block。
+主窗体日志一条目占一个 block：'[时间] 方向 正文'（TX 行聊天式右对齐，行首
+多一个制表符，见 main_window._sync_log_tab_stop，正则用 ^\\s* 兼容）。头行与
+正文同块，悬停头行等效悬停正文；正文为空（方向后无内容）没有可互转的东西，
+返回 ''，不能去借下一条目的正文。
 """
 from __future__ import annotations
 
@@ -12,17 +14,17 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from core.text_format import alt_format_tooltip
 
-_HEADER_ONLY_RE = re.compile(r'^\[[^\]]+\] (RX|TX|SYS)\s*$')
-_ENTRY_RE = re.compile(r'^\[[^\]]+\] (RX|TX|SYS)\s?(.*)$', re.DOTALL)
+_HEADER_ONLY_RE = re.compile(r'^\s*\[[^\]]+\] (RX|TX|SYS)\s*$')
+_ENTRY_RE = re.compile(r'^\s*\[[^\]]+\] (RX|TX|SYS)\s?(.*)$', re.DOTALL)
 
 
 def tooltip_for_block(block: QtGui.QTextBlock) -> str:
-    """取该 block（或其后继正文 block）的格式互转提示。"""
+    """取该 block（头行等效正文；空正文返回 ''）的格式互转提示。"""
     if not block.isValid():
         return ''
     text = block.text()
     if _HEADER_ONLY_RE.match(text):
-        return alt_format_tooltip(block.next().text())
+        return ''  # 单 block 条目没有正文；不取下一条（那是别的条目的正文）
     m = _ENTRY_RE.match(text)
     return alt_format_tooltip(m.group(2)) if m else ''
 

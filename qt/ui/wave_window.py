@@ -2,9 +2,11 @@
 """波形窗（M2）：pyqtgraph 实时曲线，能力对齐主线波形窗，交互按 Qt 习惯调整。
 
 布局：
-  工具行  协议 | 窗口宽度 | 滤波+参数 | 暂停 | 清空 | 模拟数据 | 导出CSV
+  工具行  协议 | 显示点数 | 滤波+参数 | 暂停 | 清空 | 模拟数据 | 导出(PNG/CSV菜单)
   Y轴行   自动Y | Ymin/Ymax | 通道芯片（点按开关曲线、双击改名）
-  绘图区  pyqtgraph：左键拖动平移/滚轮缩放浏览历史，拖回最右端恢复实时跟随
+  绘图区  pyqtgraph：左键拖动平移/滚轮缩放浏览历史，拖回最右端恢复实时跟随；
+          右键中文菜单（恢复自动缩放/导出PNG/导出CSV/显示网格）；
+          悬停显示十字线与读数框（首行 x，随后每条可见曲线一行同色 y）
   状态行  帧 | 解析失败 | FPS | 视图模式
 
 暂停语义与主线一致：冻结曲线数据，RX 显示与 JustFloat 帧排空不受影响。
@@ -26,14 +28,30 @@ from core.ai_doc import get_ai_format_doc
 from core.settings import read_setting, write_setting
 from core.wave_presets import WavePreset, default_presets_path, load_wave_presets, save_wave_presets
 from core.wave_state import FILTERS, PROTOCOLS, WaveState
+from ui import theme
 from ui.wave_slider import WaveSliderBar
 from ui.xy_view import XYSection
 
-CURVE_COLORS = ['#00C8FF', '#FF6E6E', '#78FF8C', '#FFDC00',
-                '#FF82FF', '#AA8CFF', '#FFA03C', '#00FFC8',
-                '#5AA0FF', '#FF69B4', '#B4FF3C', '#FFFA96',
-                '#0096FF', '#C878FF', '#78DC78', '#FFC878']  # 主线 get_wave_channel_color 16 色同色号
+CURVE_COLORS = theme.curve_colors('dark')  # 深色基准 16 色（主线同色号；色板定义在 theme.py）
 WINDOW_PRESETS = ('200', '500', '1000', '2000', '5000', '10000', '50000')
+
+
+def _chip_indicator_qss(name: str | None = None) -> str:
+    """CH/自动Y 复选框 indicator 高对比边框 QSS（颜色随主题，深浅两套都保证可辨）。"""
+    p = theme.palette(name)
+    return ('QCheckBox::indicator { width: 13px; height: 13px; border: 1px solid %s;'
+            ' border-radius: 3px; background: %s; }'
+            'QCheckBox::indicator:hover { border-color: %s; }'
+            % (p['chip_border'], p['chip_bg'], p['chip_border_hi']))
+
+
+# 深色口径常量保留（既有引用/测试比对用）；运行时样式一律走 _chip_indicator_qss()
+CHIP_BORDER = theme.color('chip_border', 'dark')
+CHIP_BORDER_HI = theme.color('chip_border_hi', 'dark')
+CHIP_INDICATOR_QSS = _chip_indicator_qss('dark')
+
+# 填充设置键（主线同款）：工具行不再放复选框，设置页经 apply_fill_from_setting() 驱动
+FILL_SETTING_KEY = 'wave/fill_under'
 
 pg.setConfigOptions(antialias=False, background='#161B26', foreground='#8A93A6')
 
@@ -50,6 +68,7 @@ class WaveWindow(QtWidgets.QWidget):
         self.state.on_note = self._on_note
         self._curves: list[pg.PlotDataItem] = []
         self._chips: list[QtWidgets.QCheckBox] = []
+        self._curve_colors = list(CURVE_COLORS)  # 实例副本，随主题切换整体替换
         self._syncing = False
         self._fps_last_count = 0
         self._fps_last_at = time.monotonic()
@@ -68,6 +87,7 @@ class WaveWindow(QtWidgets.QWidget):
         self.combo_window.addItems(WINDOW_PRESETS)
         self.combo_window.setCurrentText('1000')
         self.combo_window.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        self.combo_window.setToolTip('绘图区横向显示的采样点数（帧），即「显示点数」')
         self.combo_window.currentTextChanged.connect(self._on_window_changed)
 
         self.combo_filter = QtWidgets.QComboBox()
@@ -94,9 +114,14 @@ class WaveWindow(QtWidgets.QWidget):
         self.btn_sim.setCheckable(True)
         self.btn_sim.toggled.connect(self._on_sim_toggled)
 
-        self.btn_csv = QtWidgets.QPushButton('导出CSV')
-        self.btn_csv.setObjectName('tool')
-        self.btn_csv.clicked.connect(self._export_csv)
+        # 「导出」菜单按钮：导出PNG（时域绘图区单图渲染）/ 导出CSV（全量缓冲）
+        self.btn_export = QtWidgets.QPushButton('导出')
+        self.btn_export.setObjectName('tool')
+        self.menu_export = QtWidgets.QMenu(self.btn_export)
+        self.menu_export.addAction('导出PNG', self._export_png)
+        self.menu_export.addAction('导出CSV', self._export_csv)
+        self.btn_export.setMenu(self.menu_export)
+        self.btn_export.setToolTip('导出PNG（当前时域绘图区单图） / 导出CSV（全量缓冲）')
 
         self.btn_format = QtWidgets.QPushButton('格式说明')
         self.btn_format.setObjectName('tool')
@@ -134,9 +159,11 @@ class WaveWindow(QtWidgets.QWidget):
         self.btn_preset_del.clicked.connect(self._delete_preset_clicked)
 
         toolbar = QtWidgets.QHBoxLayout()
+        lbl_window = QtWidgets.QLabel('显示点数')
+        lbl_window.setToolTip('绘图区横向显示的采样点数（帧），避免与 XY 相位图的「窗口数/窗口宽度」混淆')
         toolbar.addWidget(QtWidgets.QLabel('协议'))
         toolbar.addWidget(self.combo_protocol)
-        toolbar.addWidget(QtWidgets.QLabel('窗口'))
+        toolbar.addWidget(lbl_window)
         toolbar.addWidget(self.combo_window)
         toolbar.addWidget(QtWidgets.QLabel('滤波'))
         toolbar.addWidget(self.combo_filter)
@@ -144,7 +171,7 @@ class WaveWindow(QtWidgets.QWidget):
         toolbar.addWidget(self.btn_pause)
         toolbar.addWidget(self.btn_clear)
         toolbar.addWidget(self.btn_sim)
-        toolbar.addWidget(self.btn_csv)
+        toolbar.addWidget(self.btn_export)
         toolbar.addWidget(self.btn_format)
         toolbar.addWidget(self.btn_xy)
         toolbar.addWidget(self.btn_record)
@@ -154,17 +181,14 @@ class WaveWindow(QtWidgets.QWidget):
         toolbar.addWidget(self.btn_preset_del)
         toolbar.addStretch(1)
 
-        # ---- 曲线下方同色浅填充（主线同款：alpha 26/255，铺到绘图区底部）----
-        self.chk_fill = QtWidgets.QCheckBox('曲线填充')
+        # ---- 曲线下方同色浅填充：设置键 FILL_SETTING_KEY，工具行已无复选框（设置页调用 apply_fill_from_setting）----
         # read_setting 只回字符串：缺省视为开（主线口径），仅显式 'false' 关
-        self.chk_fill.setChecked(read_setting('wave/fill_under', 'true').lower() != 'false')
-        self.chk_fill.setToolTip('曲线下方低透明度同色填充（多通道叠加也可读），主线同款')
-        self.chk_fill.toggled.connect(self._on_fill_toggled)
-        toolbar.addWidget(self.chk_fill)
+        self._fill_under = read_setting(FILL_SETTING_KEY, 'true').lower() != 'false'
 
         # ---- Y 轴行 ----
         self.chk_auto_y = QtWidgets.QCheckBox('自动Y')
         self.chk_auto_y.setChecked(self.state.auto_y)
+        self._style_auto_y()  # indicator 边框与 CH 芯片同款高对比，颜色随主题
         self.chk_auto_y.toggled.connect(self._on_auto_y_toggled)
 
         self.edit_ymin = QtWidgets.QLineEdit()
@@ -186,8 +210,9 @@ class WaveWindow(QtWidgets.QWidget):
         self.chip_layout.addStretch(1)
         self.chip_area.setWidget(self.chip_host)
 
-        # ---- XY 相位图区（默认隐藏，工具行按钮开关） ----
+        # ---- XY 相位图区（默认隐藏，工具行按钮开关；导出CSV 菜单复用波形页导出） ----
         self.xy_section = XYSection(self.state)
+        self.xy_section.csv_export = self._export_csv
         self.xy_section.setVisible(False)
 
         yrow = QtWidgets.QHBoxLayout()
@@ -198,13 +223,16 @@ class WaveWindow(QtWidgets.QWidget):
 
         # ---- 绘图区 ----
         self.plot = pg.PlotWidget()
+        self._grid_on = True
         self.plot.showGrid(x=True, y=True, alpha=0.25)
         vb = self.plot.getViewBox()
+        vb.menu = None  # 关掉 pyqtgraph 英文右键菜单，右键走自建中文菜单（_show_plot_menu）
         vb.sigRangeChangedManually.connect(self._on_manual_range)
         vb.setMouseEnabled(x=True, y=False)  # Y 由自动/手动量程管，鼠标只管 X
         # 滚轮语义对齐主线：曲线/纵轴区=缩 Y（鼠标处为锚点），横轴区=调显示窗口帧数；
-        # 拦下 pyqtgraph 默认滚轮，由事件过滤器接管
+        # 拦下 pyqtgraph 默认滚轮，由事件过滤器接管（右键菜单/悬停读数也合并进同一过滤器）
         self.plot.viewport().installEventFilter(self)
+        self._init_hover()
 
         # ---- 历史滑块条（主线复刻）：红=起点拖宽度、绿=中心拖位置、紫=终点拖宽度 ----
         self.slider_view = WaveSliderBar(self.state)
@@ -231,6 +259,52 @@ class WaveWindow(QtWidgets.QWidget):
         self._stats_timer = QtCore.QTimer(self)
         self._stats_timer.timeout.connect(self._update_stats)
         self._stats_timer.start(self.STATS_INTERVAL_MS)
+
+        # 主题联动：按当前主题同步一次（启动即浅色的场景），此后随 set_theme 通知刷新
+        self.apply_theme()
+        theme.register_listener(self.apply_theme)
+
+    # ---------- 主题联动 ----------
+
+    def apply_theme(self, name: str | None = None):
+        """主题切换回调（theme.set_theme 通知）：绘图区、芯片、曲线、悬停读数随主题。"""
+        p = theme.palette(name)
+        theme.style_plot_widget(self.plot, name)
+        self._curve_colors = theme.curve_colors(name)
+        self._style_auto_y()
+        for i, chip in enumerate(self._chips):
+            self._style_chip(chip, i)
+        for i, curve in enumerate(self._curves):
+            curve.setPen(pg.mkPen(self._curve_colors[i % len(self._curve_colors)], width=1.2))
+            self._apply_fill_to_curve(curve, i)
+        self._refresh_hover_theme(p)
+
+    def _refresh_hover_theme(self, p: dict):
+        """悬停十字线/读数框换肤（_init_hover 重建时同样按当前主题取色）。"""
+        if not hasattr(self, '_readout'):
+            return
+        pen = pg.mkPen(p['crosshair'], width=1, style=QtCore.Qt.PenStyle.DashLine)
+        self._vline.setPen(pen)
+        self._hline.setPen(pen)
+        self._readout.fill = pg.mkBrush(p['readout_bg'])
+        self._readout.border = pg.mkPen(p['readout_border'])
+        self._readout.update()
+
+    def _style_auto_y(self):
+        """自动Y indicator：高对比边框 + 勾选底色=强调色（颜色随主题）。"""
+        self.chk_auto_y.setStyleSheet(
+            _chip_indicator_qss() +
+            'QCheckBox::indicator:checked { background: %s; border-color: %s; }'
+            % (theme.color('accent'), theme.color('chip_border_hi')))
+
+    def _style_chip(self, chip: QtWidgets.QCheckBox, index: int):
+        """CH 芯片配色：文字/勾选底=通道色，indicator 边框随主题。"""
+        color = self._curve_colors[index % len(self._curve_colors)]
+        chip.setStyleSheet(
+            _chip_indicator_qss() +
+            f'QCheckBox {{ color: {color}; padding: 2px 6px; }}'
+            f'QCheckBox::indicator:checked {{ background: {color};'
+            f' border-color: {theme.color("chip_border_hi")}; }}')
 
     # ---------- 数据入口 ----------
 
@@ -330,8 +404,7 @@ class WaveWindow(QtWidgets.QWidget):
             c = len(self._chips)
             chip = QtWidgets.QCheckBox(st.channel_display_name(c))
             chip.setChecked(True)
-            color = CURVE_COLORS[c % len(CURVE_COLORS)]
-            chip.setStyleSheet(f'QCheckBox {{ color: {color}; padding: 2px 6px; }}')
+            self._style_chip(chip, c)  # 文字=通道色；indicator 高对比边框随主题
             chip.toggled.connect(lambda checked, idx=c: self._on_chip_toggled(idx, checked))
             chip.setToolTip('点按开关该通道曲线；双击改名')
             chip.installEventFilter(self)
@@ -359,6 +432,18 @@ class WaveWindow(QtWidgets.QWidget):
                 return True  # XY 模式滚轮不动共享视图状态（主线同款）
             self._on_plot_wheel(event)
             return True  # 拦下 pyqtgraph 默认滚轮
+        # 绘图区右键：自建中文菜单（pyqtgraph 默认英文菜单已关）
+        if obj is self.plot.viewport() and event.type() == QtCore.QEvent.Type.MouseButtonPress \
+                and event.button() == QtCore.Qt.MouseButton.RightButton:
+            self._show_plot_menu(event.globalPosition().toPoint())
+            return True
+        # 绘图区悬停：十字线 + 读数框（同一过滤器内合并处理，避免同名过滤器互相覆盖）
+        if obj is self.plot.viewport() and event.type() == QtCore.QEvent.Type.MouseMove:
+            self._update_hover(event.position().toPoint())
+            return super().eventFilter(obj, event)
+        if obj is self.plot.viewport() and event.type() == QtCore.QEvent.Type.Leave:
+            self._hide_hover()
+            return super().eventFilter(obj, event)
         return super().eventFilter(obj, event)
 
     def _on_chip_toggled(self, idx: int, checked: bool):
@@ -386,13 +471,16 @@ class WaveWindow(QtWidgets.QWidget):
     def _ensure_curves(self, n: int):
         while len(self._curves) < n:
             c = len(self._curves)
-            pen = pg.mkPen(CURVE_COLORS[c % len(CURVE_COLORS)], width=1.2)
+            pen = pg.mkPen(self._curve_colors[c % len(self._curve_colors)], width=1.2)
             curve = self.plot.plot([], [], pen=pen)
             self._curves.append(curve)
             self._apply_fill_to_curve(curve, c)
 
     def _rebuild_all(self):
-        """协议切换/清空后：曲线与芯片按空缓冲重建。"""
+        """协议切换/清空后：曲线与芯片按空缓冲重建。
+
+        注意 plot.clear() 会把 addItem 挂进去的悬停十字线/读数框一并移除，需重挂。
+        """
         self.plot.clear()
         self._curves = []
         for chip in self._chips:
@@ -401,6 +489,7 @@ class WaveWindow(QtWidgets.QWidget):
         self._chips = []
         self._ensure_curves(len(self.state.ch_values))
         self._ensure_chips()
+        self._init_hover()
 
     def repaint_wave(self):
         st = self.state
@@ -423,7 +512,7 @@ class WaveWindow(QtWidgets.QWidget):
         vb.setYRange(y_min, y_max, padding=0)
         self._syncing = False
         # 填充基线跟随绘图区底部（主线：铺到 plot_bottom，不是铺到 0）
-        if self.chk_fill.isChecked():
+        if self._fill_under:
             fill_level = y_min - 0.05 * max(y_max - y_min, 1e-9)
             for curve in self._curves:
                 curve.setFillLevel(fill_level)
@@ -432,9 +521,9 @@ class WaveWindow(QtWidgets.QWidget):
     # ---------- 曲线填充 / 滚轮缩放 ----------
 
     def _apply_fill_to_curve(self, curve, index: int):
-        """按开关与通道色应用/撤销线下浅填充（主线：同色 alpha=26/255）。"""
-        if self.chk_fill.isChecked():
-            color = pg.mkColor(CURVE_COLORS[index % len(CURVE_COLORS)])
+        """按设置开关与通道色应用/撤销线下浅填充（主线：同色 alpha=26/255）。"""
+        if self._fill_under:
+            color = pg.mkColor(self._curve_colors[index % len(self._curve_colors)])
             brush = pg.mkBrush(color.red(), color.green(), color.blue(), 26)
             curve.setBrush(brush)
             curve._fill_brush = brush  # opts['brush'] 不存，挂属性供自省/测试
@@ -443,8 +532,9 @@ class WaveWindow(QtWidgets.QWidget):
             curve.setFillLevel(None)
             curve._fill_brush = None
 
-    def _on_fill_toggled(self, on: bool):
-        write_setting('wave/fill_under', on)
+    def apply_fill_from_setting(self):
+        """公共入口：重读设置键 wave/fill_under 并应用到全部曲线（设置页调用）。"""
+        self._fill_under = read_setting(FILL_SETTING_KEY, 'true').lower() != 'false'
         for i, curve in enumerate(self._curves):
             self._apply_fill_to_curve(curve, i)
         self.repaint_wave()
@@ -488,6 +578,100 @@ class WaveWindow(QtWidgets.QWidget):
         vb = self.plot.getViewBox()
         x0, x1 = vb.viewRange()[0]
         self.state.set_view_window(int(round(x0)), int(round(x1)))
+
+    # ---------- 绘图区右键中文菜单 / 显示网格 ----------
+
+    def _new_plot_menu(self) -> QtWidgets.QMenu:
+        """时域绘图区右键菜单（全中文；pyqtgraph 默认英文菜单已置 None）。"""
+        menu = QtWidgets.QMenu(self)
+        menu.addAction('恢复自动缩放', self._restore_auto_range)
+        menu.addAction('导出PNG', self._export_png)
+        menu.addAction('导出CSV', self._export_csv)
+        menu.addSeparator()
+        act_grid = menu.addAction('显示网格')
+        act_grid.setCheckable(True)
+        act_grid.setChecked(self._grid_on)
+        act_grid.toggled.connect(self._set_grid_on)
+        return menu
+
+    def _show_plot_menu(self, global_pos):
+        self._new_plot_menu().exec(global_pos)
+
+    def _restore_auto_range(self):
+        """恢复自动缩放：自动Y + 回到实时跟随（最新「显示点数」窗口）。"""
+        self.chk_auto_y.setChecked(True)
+        self.state.view_start = -1
+        self.repaint_wave()
+
+    def _set_grid_on(self, on: bool):
+        self._grid_on = on
+        self.plot.showGrid(x=on, y=on, alpha=0.25)
+
+    # ---------- 悬停十字线读数 ----------
+
+    def _init_hover(self):
+        """十字线 + 读数框：pyqtgraph 例程同款 InfiniteLine，读数用 TextItem(html)。"""
+        self.plot.viewport().setMouseTracking(True)
+        p = theme.palette()  # 十字线/读数框配色随当前主题（_rebuild_all 重建后同样取色）
+        pen = pg.mkPen(p['crosshair'], width=1, style=QtCore.Qt.PenStyle.DashLine)
+        self._vline = pg.InfiniteLine(angle=90, movable=False, pen=pen)
+        self._hline = pg.InfiniteLine(angle=0, movable=False, pen=pen)
+        self._readout = pg.TextItem(html='', fill=p['readout_bg'], border=p['readout_border'])
+        self._readout.setZValue(50)
+        for item in (self._vline, self._hline, self._readout):
+            item.hide()
+            self.plot.addItem(item)
+
+    def _hover_rows(self, x_val: float):
+        """x_val 处各可见曲线的实际采样：searchsorted 后取左右邻中更近者（非像素估算）。"""
+        st = self.state
+        start, end, _follow = st.view_range()
+        rows = []
+        for c, curve in enumerate(self._curves):
+            if c < len(st.enabled_channels) and not st.enabled_channels[c]:
+                continue
+            data, offset, length = st.view_data(c, start, end)
+            if length <= 0:
+                continue
+            xs = np.arange(offset, offset + length, dtype=np.float64)
+            j = min(max(int(np.searchsorted(xs, x_val)), 0), xs.size - 1)
+            if j > 0 and abs(xs[j - 1] - x_val) <= abs(xs[j] - x_val):
+                j -= 1
+            rows.append((st.channel_display_name(c), float(data[offset + j]),
+                         self._curve_colors[c % len(self._curve_colors)]))
+        return rows
+
+    def _update_hover(self, pos):
+        vb = self.plot.getViewBox()
+        scene_pos = self.plot.mapToScene(pos)
+        if not vb.sceneBoundingRect().contains(scene_pos):
+            self._hide_hover()
+            return
+        vpt = vb.mapSceneToView(scene_pos)
+        rows = self._hover_rows(vpt.x())
+        if not rows:
+            self._hide_hover()
+            return
+        self._vline.setPos(vpt.x())
+        self._hline.setPos(vpt.y())
+        self._vline.show()
+        self._hline.show()
+        # 首行 x 坐标，随后每条可见曲线一行「曲线名: y值」，文字颜色与曲线一致
+        lines = [f'<span style="color:#E1E6F0;">x = {vpt.x():.0f}</span>']
+        for name, y, color in rows:
+            lines.append(f'<span style="color:{color};">{name}: {y:.6g}</span>')
+        self._readout.setHtml('<br>'.join(lines))
+        # 靠边翻转锚点：读数框始终朝数据区内部展开
+        (x0, x1), (y0, y1) = vb.viewRange()
+        ax = 1 if (x1 - vpt.x()) < 0.3 * (x1 - x0) else 0
+        ay = 1 if (vpt.y() - y0) < 0.3 * (y1 - y0) else 0
+        self._readout.setAnchor((ax, ay))
+        self._readout.setPos(vpt.x(), vpt.y())
+        self._readout.show()
+
+    def _hide_hover(self):
+        for item in (self._vline, self._hline, self._readout):
+            item.hide()
 
     # ---------- 状态行 ----------
 
@@ -660,7 +844,23 @@ RawData（原始字节流）
             dialog.setWindowTitle('数据格式说明 — 已复制到剪贴板')
             QtCore.QTimer.singleShot(1500, lambda: dialog.setWindowTitle('数据格式说明'))
 
-    # ---------- 导出 CSV ----------
+    # ---------- 导出 PNG / CSV ----------
+
+    def _export_png(self):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, '导出PNG', 'wave.png', 'PNG (*.png)')
+        if not path:
+            return
+        try:
+            self.export_png(path)
+        except OSError as exc:
+            QtWidgets.QMessageBox.warning(self, '导出PNG', f'导出失败: {exc}')
+
+    def export_png(self, path: str):
+        """导出当前时域绘图区渲染（单图口径：仅 self.plot 一张，含坐标轴/网格/曲线；
+        XY 相位图不在其中——XY 各格 PNG 走 XY 格右键菜单「导出PNG」）。"""
+        if not self.plot.grab().save(path):
+            raise OSError('PNG 渲染保存失败')
 
     def _export_csv(self):
         st = self.state
