@@ -320,7 +320,7 @@ def run_headless(opts: HeadlessOptions, serial_factory=None, print_fn=print) -> 
         if serial_factory is None:
             def serial_factory(port, baud, dtr, rts):  # noqa: E306 - 默认 pyserial
                 import serial as pyserial
-                s = pyserial.Serial(port, baud, timeout=0.1, write_timeout=1.0)
+                s = pyserial.serial_for_url(port, baud, timeout=0.1, write_timeout=1.0)
                 s.dtr = dtr  # pyserial 构造器不收 dtr/rts，开完后设属性
                 s.rts = rts
                 return s
@@ -453,7 +453,7 @@ def _reset_pulse(opts: HeadlessOptions, serial_factory, print_fn):
     if factory is None:
         def factory(port, baud, dtr, rts):  # noqa: E306
             import serial as pyserial
-            s = pyserial.Serial(port, baud, timeout=0.1)
+            s = pyserial.serial_for_url(port, baud, timeout=0.1)
             s.dtr = dtr  # 同上：属性方式设线路电平
             s.rts = rts
             return s

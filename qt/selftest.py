@@ -1691,6 +1691,19 @@ def test_spectrum_panel():
 
 # ===================== 集成收口阶段新增组（自 _verify/*.py 有价值验证并入） =====================
 
+def _pump_until(app, cond, timeout_s=6.0):
+    """事件循环轮询直到 cond 成立（替代固定 sleep；超时返回最终真假）。"""
+    import time
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        app.processEvents()
+        if cond():
+            return True
+        time.sleep(0.005)
+    app.processEvents()
+    return bool(cond())
+
+
 def _fake_worker_cls():
     """替身串口线程类（信号面同 SerialWorker；start() 同步发 opened）。"""
     from PySide6 import QtCore
@@ -2440,15 +2453,7 @@ def test_ai_channel_extended():
         assert win._control_channel.start()
     sock = QTcpSocket()
 
-    def pump_until(cond, timeout_s=6.0):
-        deadline = time.time() + timeout_s
-        while time.time() < deadline:
-            app.processEvents()
-            if cond():
-                return True
-            time.sleep(0.005)
-        app.processEvents()
-        return bool(cond())
+    pump_until = lambda cond, timeout_s=6.0: _pump_until(app, cond, timeout_s)
 
     def rpc(request):
         sock.write((json.dumps(request, ensure_ascii=False) + '\n').encode('utf-8'))
@@ -2723,7 +2728,8 @@ sys.exit(0)
     try:
         app.processEvents()
         titles = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-        assert titles == ['终端', '波形', '频谱', 'Modbus', 'STM32', '设置', '关于'], str(titles)
+        assert titles == ['终端', '波形', '频谱', 'Modbus', 'STM32', '设备屏', '设置', '关于'], \
+            str(titles)
         panel = win.stm32
         assert panel.runner.cli_path == fake_bat, panel.runner.cli_path
         assert not panel.runner.is_busy() and '未探测' in panel.lbl_probe.text()
@@ -2880,7 +2886,8 @@ def test_main_tabs_integration():
     try:
         app.processEvents()
         texts = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-        assert texts == ['终端', '波形', '频谱', 'Modbus', 'STM32', '设置', '关于'], str(texts)
+        assert texts == ['终端', '波形', '频谱', 'Modbus', 'STM32', '设备屏', '设置', '关于'], \
+            str(texts)
         for i, name in enumerate(texts):   # 逐页签切换 + 渲染非空
             win.tabs.setCurrentIndex(i)
             app.processEvents()
@@ -2913,6 +2920,7 @@ def test_main_tabs_integration():
         win.close()
         _restore_settings(saved)
     print('MAIN TABS INTEGRATION OK')
+
 
 
 def run_selftest(frozen: bool = False) -> int:
@@ -2953,6 +2961,8 @@ def run_selftest(frozen: bool = False) -> int:
         test_ai_channel_extended,
         test_stm32_fake_cli,
         test_main_tabs_integration,
+        test_net_serial_url,
+        test_device_screen,
     ]
     # 冻结冒烟（--selftest-exit）：windowed onefile exe 无控制台；这些组会以 sys.executable
     # 再起子进程（冻结时那是本 exe 自身 → 卡死）或访问外网——剔除。

@@ -1,0 +1,24 @@
+# ser2net 4.x YAML 配置样例（RK356x/LubanCat 板端）
+# 拷贝为 /etc/ser2net.yaml 后按实际硬件修改设备号与波特率，systemctl restart ser2net
+#
+# 要点：
+#   - rfc2217://  开启 RFC2217 远程波特率/流控协商（LiuScope 端改波特率会同步到板端）
+#   - remctl      允许客户端用 RFC2217 控制命令（LiuScope 需要）
+#   - max-connections=1  独占模式，避免两个客户端同时写串口
+
+connection: &con_uart1
+  accepter: tcp,7000
+  connector: serialdev,/dev/ttyS3,115200N81,local
+  options:
+    rfc2217: true
+    remctl: true
+    max-connections: 1
+
+# USB 串口示例（CH340 小板接板子 USB 口时通常是 /dev/ttyUSB0）：
+# connection: &con_usb0
+#   accepter: tcp,7001
+#   connector: serialdev,/dev/ttyUSB0,115200N81,local
+#   options:
+#     rfc2217: true
+#     remctl: true
+#     max-connections: 1
