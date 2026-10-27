@@ -33,7 +33,7 @@ from ui import theme
 
 DEFAULT_UDP_PORT = 9202   # 设计 §4：视频面 UDP 9202
 
-_HEADER = struct.Struct('<IIB')   # [seq u32][ts_ms u32][flags u8]
+_HEADER = struct.Struct('>IIB')   # [seq u32][ts_ms u32][flags u8]，网络字节序（与板端 server_rk.video.packetize 一致）
 _START_CODE = b'\x00\x00\x01'
 _NAL_SC = b'\x00\x00\x00\x01'     # 对外统一补 4 字节起始码（Annex-B）
 

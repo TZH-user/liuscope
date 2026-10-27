@@ -56,7 +56,7 @@
 ## 4. 协议细节（v2 草案）
 
 - **控制通道**：TCP 9201；首包 `hello{v,nonce}` → `pair{code}` → `session{key}`（PSK 派生，控制面后续可选 libsodium secretbox；M1 可先明文+配对码，M2 前必须加密）。
-- **视频面**：UDP 9202；包 = `[seq u32][ts_ms u32][flags u8][payload NAL]`；PC 丢包检测（seq 跳变）→ 控制通道发 `resync{from_seq}` → 板端强制 IDR；静止画面 ffmpeg 无帧输出即零带宽（scrcpy 同款特性）。
+- **视频面**：UDP 9202；包 = `[seq u32][ts_ms u32][flags u8][payload NAL]`，多字节字段一律**网络字节序（大端）**（v2 M2 对接自测发现两端端序不一致后统一，见 server-rk/test_wire_compat.py）；PC 丢包检测（seq 跳变）→ 控制通道发 `resync{from_seq}` → 板端强制 IDR；静止画面 ffmpeg 无帧输出即零带宽（scrcpy 同款特性）。
 - **键鼠批**：`{"cmd":"input","events":[{t:"key|mouse|wheel",...,ms}]}`，批间隔 ≤10ms。
 
 ## 5. AI 通道 v2（含本轮遗留的「画面调整」缺口）

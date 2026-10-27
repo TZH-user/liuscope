@@ -84,7 +84,7 @@ def rpc(obj, timeout=5.0):
 
 def save(name, data):
     import io
-    path = r"F:\软件仓库_新\开发软件\串口调试助手-V6\_verify\evidence" + "\\" + name
+    path = r"F:\软件仓库_新\开发软件\liuscope\_verify\evidence" + "\\" + name
     with io.open(path, "w", encoding="utf-8") as f:
         if isinstance(data, (dict, list)):
             json.dump(data, f, ensure_ascii=False, indent=1)

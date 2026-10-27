@@ -3014,17 +3014,17 @@ def test_device_screen():
     src = H264UdpSource(0)
     resyncs = []
     src.resync_needed.connect(resyncs.append)
-    assert src._process_datagram(struct.pack('<IIB', 0, 0, 1) + b'\x00' * 3) == b''
-    assert src._process_datagram(struct.pack('<IIB', 2, 0, 0) + b'\x00' * 3) == b''
+    assert src._process_datagram(struct.pack('>IIB', 0, 0, 1) + b'\x00' * 3) == b''
+    assert src._process_datagram(struct.pack('>IIB', 2, 0, 0) + b'\x00' * 3) == b''
     assert src.lost_count == 1 and resyncs == [0], 'seq 跳 1 应记丢 1 包并触发 resync'
     # 起始码切包落在 NAL 中间（MTU 切包常态）：跨数据报重组
     nal_a = nals[0]
     mid = len(nal_a) // 2
-    out = src._process_datagram(struct.pack('<IIB', 3, 0, 0) + nal_a[:mid])
+    out = src._process_datagram(struct.pack('>IIB', 3, 0, 0) + nal_a[:mid])
     assert out == b'', '半 NAL 不应提前吐出'
-    out = src._process_datagram(struct.pack('<IIB', 4, 0, 0) + nal_a[mid:])
+    out = src._process_datagram(struct.pack('>IIB', 4, 0, 0) + nal_a[mid:])
     assert out == b'', '无下一起始码前 NAL 悬着（完整性未知）'
-    out = src._process_datagram(struct.pack('<IIB', 5, 0, 0) + b'\x00\x00\x00\x01\x65\x88')
+    out = src._process_datagram(struct.pack('>IIB', 5, 0, 0) + b'\x00\x00\x00\x01\x65\x88')
     assert out == nal_a, f'下一 NAL 起始码到达时应吐出重组完整的前一 NAL: {out!r}'
     assert src.late_count == 0 and src.dup_count == 0
 
@@ -3042,7 +3042,7 @@ def test_device_screen():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     seq = 0
     for off in range(0, len(stream), 1200):     # MTU=1200 切包（可落在 NAL 中间）
-        head = struct.pack('<IIB', seq, off, 1 if seq == 0 else 0)
+        head = struct.pack('>IIB', seq, off, 1 if seq == 0 else 0)
         sock.sendto(head + stream[off:off + 1200], ('127.0.0.1', port))
         seq += 1
     sock.close()
