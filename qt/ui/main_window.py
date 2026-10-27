@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime
 import html
 import os
+import sys
 import time
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -20,8 +21,10 @@ from core import APP_NAME, APP_VERSION, REPO_URL
 from core.ai_doc import get_control_channel_doc
 from core.auto_log import AutoLogWriter, build_log_export_text, format_entry_block, get_log_dir
 from core.control_channel import ControlAPI, ControlChannel, handle_control_request
+from core import esp_idf_log
 from core.fault_decode import test_fault_dump_line
 from core.hexutil import bytes_to_hex_text, try_parse_hex_text
+from core.port_hints import port_open_error_hint
 from core.ports import (port_display_text, port_display_text_full,
                         port_name_from_display, pick_auto_connect_port,
                         scan_port_infos, scan_port_infos_full)
@@ -30,6 +33,7 @@ from core.serial_worker import SerialWorker
 from core.session_record import SessionRecorder, load_replay_chunks
 from core.settings import read_setting, write_setting
 from core.update_check import RELEASES_PAGE, check_app_update
+from ui.backtrace_dialog import BacktraceDialog
 from ui.find_bar import FindBar
 from ui.history_edit import HistoryLineEdit
 from ui.log_hover import LogHoverTip
@@ -224,8 +228,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_log_path = QtWidgets.QLabel('自动日志将在首次收到数据后生成到 logs 目录')
         self.lbl_log_path.setObjectName('backlog')
 
+        # ---- ESP-IDF 日志解析（v1.3.0：等级着色 + 复位横幅 + panic/backtrace 收集） ----
+        self.chk_idf = QtWidgets.QCheckBox('ESP-IDF 日志解析')
+        self.chk_idf.setChecked(read_setting('log/esp_idf_parse', '1') != '0')
+        self.chk_idf.setToolTip(
+            '识别 ESP-IDF 日志（等级着色）、复位横幅（rst:0x…）与 Guru Meditation 崩溃，\n'
+            '并收集 backtrace 地址供「解析 backtrace」翻译成源码位置')
+        self.chk_idf.toggled.connect(lambda on: write_setting('log/esp_idf_parse', '1' if on else '0'))
+        self._esp32_bt: list[str] = []   # backtrace 地址收集器（复位横幅/清空记录时重置）
+        self.btn_backtrace = QtWidgets.QPushButton('解析 backtrace')
+        self.btn_backtrace.setObjectName('tool')
+        self.btn_backtrace.setEnabled(False)
+        self.btn_backtrace.setToolTip('把收集到的崩溃地址经 addr2line 翻译成 函数 @ 文件:行')
+        self.btn_backtrace.clicked.connect(self._show_backtrace_dialog)
+
         logbar = QtWidgets.QHBoxLayout()
         logbar.addWidget(self.chk_auto_save)
+        logbar.addWidget(self.chk_idf)
         logbar.addWidget(self.lbl_log_path, 1)
         # ESP32 线控放日志行右段（顶行宽度有限；连接后可用，tooltip 带语义）
         logbar.addWidget(self.btn_mc_reset)
@@ -894,6 +913,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.open_connection()
         except (ValueError, OSError) as exc:
             self.set_status(f'打开失败: {exc}', 'status_err')
+            self._log_open_hint(str(exc))
 
     def open_connection(self):
         """按当前选口/波特率打开串口（手动连接与热插拔自动连接共用）。"""
@@ -915,8 +935,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_connect_button()
         self._connected_device = device
         self.worker.got_bytes.connect(self.ingest_bytes)
-        self.worker.open_failed.connect(lambda msg: (self._teardown_worker(),
-                                                     self.set_status(f'打开失败: {msg}', 'status_err')))
+        self.worker.open_failed.connect(self._on_open_failed)
         self.worker.lost.connect(lambda msg: (self._teardown_worker(),
                                               self.set_status(f'连接丢失: {msg}', 'status_err'),
                                               self._stop_file_send('串口已断开')))
@@ -928,6 +947,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.start()
         write_setting('connect/port', device)
         write_setting('connect/baud', str(baud))
+
+    def _on_open_failed(self, msg: str):
+        """打开失败（含工作线程异步打开失败）：提示 + 平台处置提示。"""
+        self._teardown_worker()
+        self.set_status(f'打开失败: {msg}', 'status_err')
+        self._log_open_hint(msg)
+
+    def _log_open_hint(self, exc_text: str):
+        """按平台/错误文本给一句可执行的处置提示（Linux 权限/占用、Windows 占用）。"""
+        hint = port_open_error_hint(exc_text, sys.platform)
+        if hint:
+            self._append_log('SYS', f'处置提示: {hint}')
 
     def _on_port_lost(self, msg: str):
         """自动重连开启时的丢线通知：状态栏提示，保留 worker 让线程继续重试。"""
@@ -1233,14 +1264,60 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_log_tab_stop()  # 视口宽度可能在追加间隙变了，先对齐制表位
         # 日志行配色动态读主题模块（切主题后新日志行随新主题换色）
         color = {'RX': theme.RX_COLOR, 'TX': theme.TX_COLOR}.get(direction, theme.SYS_COLOR)
+        bold = False
+        if direction == 'RX' and self.chk_idf.isChecked():
+            color, marker, bold = self._esp32_log_style(text)
+            if marker is not None:
+                self._append_log('SYS', marker)   # 复位横幅装饰行（递归，落在 RX 行前）
         safe = html.escape(text)
+        weight = 'font-weight:bold; ' if bold else ''
         self.log.appendHtml(
             f'<span style="color:{theme.TIME_COLOR}">[{_stamp()}]</span> '
             f'<b style="color:{color}">{direction}</b> '
-            f'<span style="color:{color}">{safe}</span>'
+            f'<span style="color:{color}; {weight}">{safe}</span>'
         )
         if direction == 'TX':
             self._indent_tx_line_right()
+
+    def _esp32_log_style(self, text: str):
+        """ESP-IDF 行 → (显示色, 复位装饰行|None, 加粗)。
+
+        只影响显示：条目原文（message_entries/导出/自动日志）不动。
+        副作用：收集/重置 backtrace 地址收集器，并联动「解析 backtrace」按钮。
+        """
+        clean = esp_idf_log.normalize_for_parse(text)
+        rst = esp_idf_log.is_reset_banner(clean)
+        if rst is not None:
+            self._esp32_bt.clear()   # 新一轮启动：上一次崩溃的 backtrace 作废
+            self._update_backtrace_button()
+            return theme.color('accent'), f'── 设备复位: 0x{rst[0]:02X} {rst[1]} ──', True
+        panic = esp_idf_log.is_panic(clean)
+        if panic is not None:
+            self._esp32_bt.clear()   # panic 开始新一轮崩溃现场
+            self._update_backtrace_button()
+            return theme.color('status_err'), None, True
+        if esp_idf_log.is_backtrace_line(clean):
+            addrs = esp_idf_log.extract_backtrace_addrs(clean)
+            for a in addrs:
+                if a not in self._esp32_bt:
+                    self._esp32_bt.append(a)
+            del self._esp32_bt[:-256]   # 防洪泛上限
+            self._update_backtrace_button()
+            return theme.color('text_dim'), None, False
+        info = esp_idf_log.parse_idf_line(clean)
+        if info:
+            level_color = {'E': 'status_err', 'W': 'status_warn',
+                           'D': 'text_dim', 'V': 'text_dim'}.get(info['level'])
+            if level_color:
+                return theme.color(level_color), None, False
+        return theme.color('rx'), None, False
+
+    def _update_backtrace_button(self):
+        self.btn_backtrace.setEnabled(bool(self._esp32_bt))
+
+    def _show_backtrace_dialog(self):
+        dlg = BacktraceDialog(list(self._esp32_bt), self)
+        dlg.exec()
 
     def _sync_log_tab_stop(self):
         """TX 行聊天式右对齐的 RightTab 制表位，跟随日志视口宽度（变了才重设）。
@@ -1275,6 +1352,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.buffer.clear()
         self.message_entries.clear()
         self.log.clear()
+        self._esp32_bt.clear()   # 崩溃现场随日志清空
+        self._update_backtrace_button()
         self._append_log('SYS', '消息记录已清空。')
         self._update_backlog()
 
