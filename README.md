@@ -5,7 +5,7 @@
 ![安装](https://img.shields.io/badge/%E5%85%8D%E5%AE%89%E8%A3%85-%E6%89%93%E5%8C%85exe-F48771)
 ![License](https://img.shields.io/badge/License-GPL--3.0-blue)
 
-**一个串口调试终端**：收发日志、HEX⇄文本互转、三种协议实时波形（FireWater / JustFloat / RawData）、频谱仪 + 瀑布图、XY 相位图、Modbus RTU 主站调试台、STM32 烧录调试页、日志查找与时间戳定位、文件发送、命令历史、AI 控制通道（TCP JSON 行协议，供其他 AI/脚本遥控本工具）。面向 RK3562 / STM32 等嵌入式联调。
+**一个串口调试终端**：收发日志、HEX⇄文本互转、三种协议实时波形（FireWater / JustFloat / RawData）、频谱仪 + 瀑布图、XY 相位图、Modbus RTU 主站调试台、STM32 烧录调试页、**ESP32 联调支持**、Linux 设备互联（v2 投屏原型）、日志查找与时间戳定位、文件发送、命令历史、AI 控制通道（TCP JSON 行协议，供其他 AI/脚本遥控本工具）。面向 RK3562 / STM32 / ESP32 等嵌入式联调。
 
 > v1.2.0 起软件更名 **LiuScope**（中文别名「柳镜」，原名 serialscope）。作者：折柳。
 
@@ -40,12 +40,21 @@
 
 ### 收发与日志（终端页）
 - ASCII / HEX 双格式收发，换行符可选 CR / LF / CRLF
-- **网络串口（v2 分支）**：端口框可手输 pyserial URL 直连——`rfc2217://板子IP:7000`（板端 ser2net/NPort，波特率远程协商）、`socket://`（TCP 裸透传）、`loop://`（本机回环自测）；协议见 [docs/设计_Linux设备互联_v2.md](docs/设计_Linux设备互联_v2.md)
+- **网络串口（v1.3.0 并入主线）**：端口框可手输 pyserial URL 直连——`rfc2217://板子IP:7000`（板端 ser2net/NPort，波特率远程协商）、`socket://`（TCP 裸透传）、`loop://`（本机回环自测）；协议见 [docs/设计_Linux设备互联_v2.md](docs/设计_Linux设备互联_v2.md)
 - **无换行也不丢**：板卡发送不带换行符时，残行静默约 0.5 秒自动落显（不用等 8KB 强制线）
 - **聊天式发送右对齐**：TX 行靠右显示、RX/SYS 靠左，收发对话一眼分明（窗口缩放自动重排）
 - **悬停互转**：鼠标停在任意日志行 0.4 秒，HEX 行自动解码为 文本(UTF-8) / 十进制 / float32(小端)，文本行给出 UTF-8 HEX（悬停条目头行等效于悬停其正文）
 - **波形悬停读数**：波形绘图区悬停出十字线与读数框——首行 x 坐标，随后每条可见曲线一行「曲线名: y值」（同曲线配色，y 取真实采样点）
 - STM32 HardFault 寄存器串自动解码；RX/TX 字节统计、积压常显、自动保存到 `logs\`、一键导出
+- **断线自动重连（可选）**：串口异常不立刻断开，后台每 2 秒按原参数重试，设备重插/烧录后 COM 重枚举自动接回（对齐 tio 的 auto-reconnect 体验）
+
+### ESP32 支持（v1.3.0）
+- **打开串口不拉 DTR/RTS（防复位）**：ESP32 自动下载电路把 DTR/RTS 映射到 IO0/EN，打开端口默认拉线即复位板子——设置页勾选「打开串口时不拉 DTR/RTS」后打开即松开两根线（ESP32 用户第一痛点）
+- **设备线控**：连接后日志行右侧「复位 / 下载模式 / DTR / RTS」——复位=EN 脉冲（等同按 RST 键），下载模式=esptool 经典时序进 ROM bootloader；USB-Serial/JTAG 口不适用（会提示）
+- **ESP-IDF 日志解析**：`I (2812) wifi: …` 等级着色（E 红 / W 琥珀 / D·V 暗灰）、复位横幅 `rst:0x1 (POWERON_RESET)` 插装饰行（看门狗循环一眼可见）、`Guru Meditation Error` 高亮
+- **解析 backtrace**：崩溃 backtrace 的 pc 地址自动收集，「解析 backtrace」对话框经 addr2line（自动探测 IDF 工具链 xtensa-esp32{,s2,s3} / riscv32-esp）翻译成 函数 @ 文件:行；ELF 路径与工具记忆
+- **芯片标注与波特率**：端口下拉按 VID/PID 标注 CP210x / CH340 / CH341 / FT232 / ESP32 JTAG / ESP32-S2 CDC；波特率预设补 74880（ROM 启动日志）/ 921600 / 2000000（烧录口）
+- JustFloat / FireWater 即 VOFA+ 生态协议，ESP32 端用现成组件发帧即可直接进波形页
 
 ### 查找与定位（Ctrl+F）
 - **输入即搜**：打字过程 150ms 防抖实时匹配，全部命中弱色高亮 + 当前命中强色高亮，命中行自动滚到视口中间
@@ -73,7 +82,7 @@
 - 无 CLI / 无 ST-LINK / 路径失效均给中文提示并禁用按钮，不崩；关窗自动终止在跑的子进程
 
 ### 设置与关于
-- **设置页**：主题深色 / 浅色一键切换（即时生效 + 写设置记忆，重启保持，绘图区/曲线/芯片/悬停读数整套换肤）；「曲线填充」开关（曲线下方同色浅填充，主线同款 alpha）；STM32CubeProgrammer CLI 路径选择与记忆（留空 = 自动探测）
+- **设置页**：主题深色 / 浅色 / **自定义**三档——自定义可改窗口背景/控件底/正文文字/强调色/日志底/日志文字六键（基准主题决定曲线色等其余键），改色即时 WCAG 对比度复核并警示不达标项，重启保持；「曲线填充」开关；**页面显示**（STM32 / Linux 支持页可关，记忆保持）；STM32CubeProgrammer CLI 路径选择与记忆（留空 = 自动探测）
 - **关于页**：品牌 LiuScope（柳镜）、版本、作者 折柳、许可证 GPL-3.0、仓库地址
 
 ### AI 控制通道（默认开启，详见 [AI_INTERFACE.md](AI_INTERFACE.md)）
@@ -100,7 +109,7 @@ python -m PyInstaller --noconfirm --onefile --windowed --paths qt --name LiuScop
 
 RK3562 推荐先试 `1500000 / 8 / None / One / None`；板子按协议发数据即可看到曲线，波形页「格式说明」有三种协议的帧格式与单片机示例代码。
 
-**离屏自测**（无需显示器/串口，33 组断言）：
+**离屏自测**（无需显示器/串口，45 组断言）：
 
 ```powershell
 python qt/selftest.py

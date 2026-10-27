@@ -3,6 +3,21 @@
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/) 与
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式。
 
+## [1.3.0] - 2026-10-28
+
+### 新增
+- **ESP32 支持**：
+  - 连接层——「打开串口时不拉 DTR/RTS」防复位选项（DTR/RTS 经自动下载电路映射 IO0/EN）；「复位 / 下载模式」设备线控按钮（esptool ClassicReset 语义）+ DTR/RTS 实时切换；断线自动重连（每 2s 重试，适配烧录后 COM 重枚举）；端口下拉按 VID/PID 标注芯片（CP210x/CH340/CH341/FT232/ESP32 JTAG/ESP32-S2 CDC）；波特率预设补 74880/921600/2000000
+  - 日志层——ESP-IDF 日志解析（等级着色，开关默认开）、复位横幅 `rst:0x…` 装饰行、Guru Meditation panic 高亮、backtrace pc 地址自动收集 + 「解析 backtrace」对话框（addr2line，自动探测 IDF 工具链，ELF/工具路径记忆）
+- **Linux 适配**（按需求度决策，见 `docs/research/调研_Linux串口生态与适配决策.md`）：打开失败按平台给处置提示（dialout 权限 / ModemManager·brltty 抢占 / Windows 占用）；「设备屏」页更名 **「Linux 支持」** 并入主线（v2 M1/M2 合并：网络串口 URL 直通 + UDP H.264 投屏原型 + server-rk 板端骨架）
+- **外观标准化**：自定义主题——窗口背景/控件底/正文文字/强调色/日志底/日志文字六键可调（基准主题决定曲线色等），即时 WCAG 对比度复核并在设置页警示不达标项，重启保持；页面显示设置（STM32 / Linux 支持页可关，记忆保持）
+
+### 修复
+- 主窗顶行加控件导致最小宽度超窗（ESP32 线控按钮移至日志行右段）；测试假端口实现与真实 SerialWorker 新签名同步
+
+### 文档
+- README 功能一览补 ESP32 / 自定义主题章节；`docs/research/调研_Linux串口生态与适配决策.md`（竞品特性对照与三档决策）；自测扩至 45 组（ESP32 连接层 5 组 / 日志层 3 组 / 外观与页面 1 组）
+
 ## [1.2.1] - 2026-10-27
 
 ### 新增
