@@ -180,8 +180,10 @@ def test_ports_watch():
         opened = QtCore.Signal()
         open_failed = QtCore.Signal(str)
         lost = QtCore.Signal(str)
+        port_lost = QtCore.Signal(str)
+        reconnected = QtCore.Signal()
 
-        def __init__(self, device, baud, parent=None):
+        def __init__(self, device, baud, parent=None, dtr_rts_neutral=False, auto_reconnect=False):
             super().__init__(parent)
             self.device, self.baud = device, baud
             created.append(self)
@@ -195,11 +197,13 @@ def test_ports_watch():
         def write_bytes(self, data):
             return True
 
-    old_worker_cls, old_scan = mw.SerialWorker, mw.scan_port_infos
+    old_worker_cls, old_scan = mw.SerialWorker, (mw.scan_port_infos, mw.scan_port_infos_full)
     try:
         mw.SerialWorker = FakeWorker
         mw.scan_port_infos = lambda: [('COM3', '蓝牙链接上的标准串行 (COM3)'),
                                       ('COM8', 'USB-SERIAL CH340 (COM8)')]
+        mw.scan_port_infos_full = lambda: [('COM3', '蓝牙链接上的标准串行 (COM3)', ''),
+                                           ('COM8', 'USB-SERIAL CH340 (COM8)', 'CH340')]
         win.refresh_ports()
         assert win.combo_port.count() == 2
 
@@ -224,11 +228,15 @@ def test_ports_watch():
         win._known_port_names = ['COM3']
         mw.scan_port_infos = lambda: [('COM3', ''), ('COM8', 'USB-SERIAL CH340 (COM8)'),
                                       ('COM9', 'USB-SERIAL CH340 (COM9)')]
+        mw.scan_port_infos_full = lambda: [('COM3', '', ''),
+                                           ('COM8', 'USB-SERIAL CH340 (COM8)', 'CH340'),
+                                           ('COM9', 'USB-SERIAL CH340 (COM9)', 'CH340')]
         win._port_watch_tick()
         assert len(created) == n_created
         assert win.combo_port.count() == 3, '端口列表应刷新出 COM9'
     finally:
-        mw.SerialWorker, mw.scan_port_infos = old_worker_cls, old_scan
+        mw.SerialWorker = old_worker_cls
+        mw.scan_port_infos, mw.scan_port_infos_full = old_scan
         win._port_watch_timer.stop()
     win.close()
 
@@ -1713,8 +1721,10 @@ def _fake_worker_cls():
         opened = QtCore.Signal()
         open_failed = QtCore.Signal(str)
         lost = QtCore.Signal(str)
+        port_lost = QtCore.Signal(str)
+        reconnected = QtCore.Signal()
 
-        def __init__(self, device, baud, parent=None):
+        def __init__(self, device, baud, parent=None, dtr_rts_neutral=False, auto_reconnect=False):
             super().__init__(parent)
             self.device, self.baud = device, baud
 
@@ -1754,10 +1764,12 @@ def test_connect_button_states():
 
     FakeWorker = _fake_worker_cls()
     saved = _snapshot_settings(_CONNECT_KEYS)
-    old_worker_cls, old_scan = mw.SerialWorker, mw.scan_port_infos
+    old_worker_cls, old_scan = mw.SerialWorker, (mw.scan_port_infos, mw.scan_port_infos_full)
     mw.SerialWorker = FakeWorker
     mw.scan_port_infos = lambda: [('COM3', '蓝牙链接上的标准串行 (COM3)'),
                                   ('COM8', 'USB-SERIAL CH340 (COM8)')]
+    mw.scan_port_infos_full = lambda: [('COM3', '蓝牙链接上的标准串行 (COM3)', ''),
+                                       ('COM8', 'USB-SERIAL CH340 (COM8)', 'CH340')]
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     win = mw.MainWindow()
     win.show()
@@ -1789,7 +1801,8 @@ def test_connect_button_states():
         win._teardown_worker()
         assert btn.text() == '连接'
     finally:
-        mw.SerialWorker, mw.scan_port_infos = old_worker_cls, old_scan
+        mw.SerialWorker = old_worker_cls
+        mw.scan_port_infos, mw.scan_port_infos_full = old_scan
         win._port_watch_timer.stop()
         win.close()
         _restore_settings(saved)  # closeEvent 会回写 connect/*，这里还原
@@ -2437,11 +2450,14 @@ def test_ai_channel_extended():
 
     FakeWorker = _fake_worker_cls()
     saved = _snapshot_settings(('connect/baud', 'connect/port', 'ui/theme', 'wave/fill_under'))
-    old_worker_cls, old_scan = mw.SerialWorker, mw.scan_port_infos
+    old_worker_cls, old_scan = mw.SerialWorker, (mw.scan_port_infos, mw.scan_port_infos_full)
     old_ports_scan = core_ports.scan_port_infos
     mw.SerialWorker = FakeWorker
     fake_ports = [('COM3', '蓝牙链接上的标准串行 (COM3)'), ('COM8', 'USB-SERIAL CH340 (COM8)')]
+    fake_ports_full = [(d, desc, 'CH340' if 'CH340' in desc else '')
+                       for d, desc in fake_ports]
     mw.scan_port_infos = lambda: fake_ports
+    mw.scan_port_infos_full = lambda: fake_ports_full
     core_ports.scan_port_infos = lambda: fake_ports  # 控制通道闭包构建时从 core.ports 取
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     win = mw.MainWindow()
@@ -2577,7 +2593,8 @@ def test_ai_channel_extended():
         win.btn_connect.click()
         assert pump_until(lambda: win.worker is None)
     finally:
-        mw.SerialWorker, mw.scan_port_infos = old_worker_cls, old_scan
+        mw.SerialWorker = old_worker_cls
+        mw.scan_port_infos, mw.scan_port_infos_full = old_scan
         core_ports.scan_port_infos = old_ports_scan
         sock.close()
         win._port_watch_timer.stop()

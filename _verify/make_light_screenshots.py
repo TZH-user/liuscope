@@ -89,9 +89,9 @@ def main() -> int:
     write_setting('update/last_check', '9999999999')   # 屏蔽启动 3s 自动更新检查
     os.makedirs(DOCS_DIR, exist_ok=True)
 
-    old_worker_cls, old_scan = mw.SerialWorker, mw.scan_port_infos
+    old_worker_cls, old_scan = mw.SerialWorker, mw.scan_port_infos_full
     mw.SerialWorker = FakeWorker
-    mw.scan_port_infos = lambda: [('COM9', 'USB-SERIAL CH340 (COM9)')]
+    mw.scan_port_infos_full = lambda: [('COM9', 'USB-SERIAL CH340 (COM9)', 'CH340')]
     try:
         write_setting(theme.THEME_SETTING_KEY, theme.LIGHT_KEY)  # 建窗会按 ini 恢复
         theme.set_theme(theme.LIGHT_KEY)
@@ -125,7 +125,7 @@ def main() -> int:
         win._port_watch_timer.stop()
         win.close()
     finally:
-        mw.SerialWorker, mw.scan_port_infos = old_worker_cls, old_scan
+        mw.SerialWorker, mw.scan_port_infos_full = old_worker_cls, old_scan
         for key, value in saved.items():
             write_setting(key, value)         # 空串 = read_setting 视同缺省
         theme.set_theme(theme.DARK_KEY)

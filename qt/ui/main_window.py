@@ -22,8 +22,9 @@ from core.auto_log import AutoLogWriter, build_log_export_text, format_entry_blo
 from core.control_channel import ControlAPI, ControlChannel, handle_control_request
 from core.fault_decode import test_fault_dump_line
 from core.hexutil import bytes_to_hex_text, try_parse_hex_text
-from core.ports import (port_display_text, port_name_from_display,
-                        pick_auto_connect_port, scan_port_infos)
+from core.ports import (port_display_text, port_display_text_full,
+                        port_name_from_display, pick_auto_connect_port,
+                        scan_port_infos, scan_port_infos_full)
 from core.rx_buffer import RxBuffer
 from core.serial_worker import SerialWorker
 from core.session_record import SessionRecorder, load_replay_chunks
@@ -140,11 +141,37 @@ class MainWindow(QtWidgets.QMainWindow):
             'socket://192.168.1.50:7001（TCP 裸透传）')
         self.combo_baud = QtWidgets.QComboBox()
         self.combo_baud.setEditable(True)
-        self.combo_baud.addItems(['1500000', '921600', '460800', '115200'])
+        # v1.3.0：补 ESP32 常用波特率——74880(ROM 启动日志)、921600/2000000(烧录口)
+        self.combo_baud.addItems(['2000000', '1500000', '921600', '460800', '115200', '74880'])
         self.btn_connect = QtWidgets.QPushButton('连接')
         self.btn_connect.clicked.connect(self.toggle_connect)
         self.btn_refresh = QtWidgets.QPushButton('刷新串口')
         self.btn_refresh.clicked.connect(self.refresh_ports)
+
+        # ---- ESP32 线控（v1.3.0：连接后才可用；loop:// 等虚拟端口失败即忽略） ----
+        # ESP32 自动下载电路：DTR→IO0（启动模式）、RTS→EN（复位）
+        self.btn_mc_reset = QtWidgets.QPushButton('复位')
+        self.btn_mc_reset.setObjectName('tool')
+        self.btn_mc_reset.setToolTip('运行模式复位：EN 拉低再放开（等同按板上 RST 键）')
+        self.btn_mc_reset.clicked.connect(self._esp32_reset)
+        self.btn_download = QtWidgets.QPushButton('下载模式')
+        self.btn_download.setObjectName('tool')
+        self.btn_download.setToolTip('进 ROM 下载模式（esptool 经典时序：复位期间拉低 IO0）\n'
+                                     '进下载模式后方可烧录；USB-Serial/JTAG 口不适用')
+        self.btn_download.clicked.connect(self._esp32_download)
+        self.btn_dtr = QtWidgets.QPushButton('DTR')
+        self.btn_dtr.setObjectName('tool')
+        self.btn_dtr.setCheckable(True)
+        self.btn_dtr.setToolTip('手动拉高/松开 DTR（ESP32 电路：IO0 启动模式）')
+        self.btn_dtr.toggled.connect(lambda on: self._esp32_line('dtr', on))
+        self.btn_rts = QtWidgets.QPushButton('RTS')
+        self.btn_rts.setObjectName('tool')
+        self.btn_rts.setCheckable(True)
+        self.btn_rts.setToolTip('手动拉高/松开 RTS（ESP32 电路：EN 复位）')
+        self.btn_rts.toggled.connect(lambda on: self._esp32_line('rts', on))
+        for btn in (self.btn_mc_reset, self.btn_download, self.btn_dtr, self.btn_rts):
+            btn.setEnabled(False)   # 未连接置灰，连接后在 _update_connect_button 里启用
+
         self.chk_auto_link = QtWidgets.QCheckBox('新设备自动连接')
         self.chk_auto_link.setToolTip('勾选后扫描到新插入的串口设备即自动连接（多个新设备优先 CH340/CH341）')
         self.chk_auto_link.toggled.connect(
@@ -200,6 +227,11 @@ class MainWindow(QtWidgets.QMainWindow):
         logbar = QtWidgets.QHBoxLayout()
         logbar.addWidget(self.chk_auto_save)
         logbar.addWidget(self.lbl_log_path, 1)
+        # ESP32 线控放日志行右段（顶行宽度有限；连接后可用，tooltip 带语义）
+        logbar.addWidget(self.btn_mc_reset)
+        logbar.addWidget(self.btn_download)
+        logbar.addWidget(self.btn_dtr)
+        logbar.addWidget(self.btn_rts)
         logbar.addWidget(self.btn_clear_log)
         logbar.addWidget(self.btn_export_log)
 
@@ -799,11 +831,11 @@ class MainWindow(QtWidgets.QMainWindow):
     PORT_WATCH_INTERVAL_MS = 2000  # 主线同款 2s 轮询
 
     def refresh_ports(self):
-        infos = scan_port_infos()
+        infos = scan_port_infos_full()
         keep = port_name_from_display(self.combo_port.currentText())
         self.combo_port.clear()
-        for device, desc in infos:
-            self.combo_port.addItem(port_display_text(device, desc))
+        for device, desc, label in infos:
+            self.combo_port.addItem(port_display_text_full(device, desc, label))
         if keep:
             idx = self.combo_port.findText(keep, QtCore.Qt.MatchStartsWith)
             if idx >= 0:
@@ -876,7 +908,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self.worker:  # 换口重连：先拆旧连接
             self._teardown_worker()
-        self.worker = SerialWorker(device, baud, self)
+        neutral = read_setting('connect/dtr_rts_neutral', '0') in ('1', 'true', 'yes')
+        auto_re = read_setting('connect/auto_reconnect', '0') in ('1', 'true', 'yes')
+        self.worker = SerialWorker(device, baud, self,
+                                   dtr_rts_neutral=neutral, auto_reconnect=auto_re)
         self._update_connect_button()
         self._connected_device = device
         self.worker.got_bytes.connect(self.ingest_bytes)
@@ -885,11 +920,46 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.lost.connect(lambda msg: (self._teardown_worker(),
                                               self.set_status(f'连接丢失: {msg}', 'status_err'),
                                               self._stop_file_send('串口已断开')))
+        # 自动重连路径：丢线不拆 worker（线程在重试），重开成功后回到正常收发
+        self.worker.port_lost.connect(self._on_port_lost)
+        self.worker.reconnected.connect(self._on_reconnected)
         self.worker.opened.connect(lambda: self.set_status(f'已连接 {device} @ {baud}', 'status_ok'))
         self.worker.opened.connect(self._on_connected)
         self.worker.start()
         write_setting('connect/port', device)
         write_setting('connect/baud', str(baud))
+
+    def _on_port_lost(self, msg: str):
+        """自动重连开启时的丢线通知：状态栏提示，保留 worker 让线程继续重试。"""
+        self._stop_file_send('串口已断开')
+        self.set_status(f'连接丢失: {msg}（等待自动重连…）', 'status_err')
+        self._append_log('SYS', f'连接丢失: {msg}（自动重连中，每 2s 重试）')
+
+    def _on_reconnected(self):
+        device, baud = self._connected_device, (self.worker.baud if self.worker else 0)
+        self.set_status(f'已重连 {device} @ {baud}', 'status_ok')
+        self._append_log('SYS', f'串口已自动重连: {device} @ {baud}')
+
+    # ---------- ESP32 线控（复位 / 下载模式 / DTR / RTS） ----------
+
+    def _esp32_reset(self):
+        if not (self.worker and self.worker.ctrl_reset()):
+            self.set_status('复位失败（虚拟端口或 USB-Serial/JTAG 不支持线控）', 'status_err')
+        else:
+            self._append_log('SYS', '已发送复位时序（EN 脉冲）')
+
+    def _esp32_download(self):
+        if not (self.worker and self.worker.ctrl_download()):
+            self.set_status('进下载模式失败（虚拟端口或 USB-Serial/JTAG 不支持线控）', 'status_err')
+        else:
+            self._append_log('SYS', '已发送下载模式时序（芯片将进 ROM bootloader）')
+
+    def _esp32_line(self, which: str, on: bool):
+        if not self.worker:
+            return
+        fn = self.worker.set_dtr if which == 'dtr' else self.worker.set_rts
+        if not fn(on):
+            self.set_status(f'{which.upper()} 切换失败（端口不支持线控）', 'status_err')
 
     def _on_connected(self):
         # 连接周期归零收发统计（对齐主线 reset_receive_stats 时机）
@@ -908,7 +978,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_connect_button(self):
         """连接按钮文案跟连接状态同步：连着显示「断开」，空闲显示「连接」。"""
-        self.btn_connect.setText('断开' if self.worker else '连接')
+        connected = bool(self.worker)
+        self.btn_connect.setText('断开' if connected else '连接')
+        # ESP32 线控按钮只随连接可用；断开时弹起 DTR/RTS（guard 会拦住对已关口写线）
+        for btn in (self.btn_mc_reset, self.btn_download, self.btn_dtr, self.btn_rts):
+            btn.setEnabled(connected)
+        if not connected:
+            for btn in (self.btn_dtr, self.btn_rts):
+                if btn.isChecked():
+                    btn.setChecked(False)   # toggled → _esp32_line，此时 worker 已 None 直接跳过
 
     def _teardown_worker(self):
         self._set_connect_params_locked(False)

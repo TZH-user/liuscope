@@ -17,6 +17,25 @@ except ImportError:  # pragma: no cover - 无 pyserial 的裸环境
 _PORT_TAIL_RE = re.compile(r'\s*\(COM\d+\)\s*$', re.IGNORECASE)
 _COM_RE = re.compile(r'COM\d+', re.IGNORECASE)
 
+# VID/PID → 芯片标注（ESP32 生态常见串口芯片；v1.3.0 ESP32 支持）
+# USB-Serial/JTAG 是 ESP32-S2/S3/C3 内置口：无经典 DTR/RTS 复位时序，
+# 也不适合高频二进制流（esp-csi 官方同样建议用外挂 UART 口收流）。
+ESP32_PORT_LABELS = {
+    (0x10C4, 0xEA60): 'CP210x',
+    (0x1A86, 0x7523): 'CH340',
+    (0x1A86, 0x5523): 'CH341',
+    (0x0403, 0x6001): 'FT232',
+    (0x303A, 0x1001): 'ESP32 JTAG',
+    (0x303A, 0x0002): 'ESP32-S2 CDC',
+}
+
+
+def chip_label_for(vid, pid) -> str:
+    """VID/PID → 简短芯片标注；未知或缺失返回空串。"""
+    if vid is None or pid is None:
+        return ''
+    return ESP32_PORT_LABELS.get((vid, pid), '')
+
 
 def scan_port_infos() -> list[tuple[str, str]]:
     """返回 [(device, description)]；无 pyserial 时返回空。"""
@@ -28,6 +47,17 @@ def scan_port_infos() -> list[tuple[str, str]]:
     return infos
 
 
+def scan_port_infos_full() -> list[tuple[str, str, str]]:
+    """返回 [(device, description, chip_label)]，chip_label 由 VID/PID 映射（未知为空）。"""
+    infos: list[tuple[str, str, str]] = []
+    if list_ports is None:
+        return infos
+    for p in list_ports.comports():
+        label = chip_label_for(getattr(p, 'vid', None), getattr(p, 'pid', None))
+        infos.append((p.device, p.description or '', label))
+    return infos
+
+
 def port_display_text(device: str, description: str) -> str:
     if not description.strip():
         return device
@@ -35,6 +65,14 @@ def port_display_text(device: str, description: str) -> str:
     if not desc or desc == device:
         return device
     return f'{device} — {desc}'
+
+
+def port_display_text_full(device: str, description: str, label: str) -> str:
+    """展示文本追加芯片标注（描述里已含同名芯片词则不重复）。"""
+    base = port_display_text(device, description)
+    if label and label.lower() not in base.lower():
+        return f'{base} · {label}'
+    return base
 
 
 def port_name_from_display(text: str) -> str:

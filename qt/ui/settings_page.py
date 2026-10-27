@@ -49,6 +49,24 @@ class SettingsPage(QtWidgets.QWidget):
         self.chk_fill.setChecked(read_setting(FILL_SETTING_KEY, 'true').lower() != 'false')
         self.chk_fill.toggled.connect(self._on_fill_toggled)
 
+        # ---- 连接：ESP32（v1.3.0，主窗连接时读取） ----
+        self.chk_dtr_neutral = QtWidgets.QCheckBox('打开串口时不拉 DTR/RTS（ESP32 防复位）')
+        self.chk_dtr_neutral.setToolTip(
+            'ESP32 自动下载电路把 DTR/RTS 映射到 IO0/EN，打开端口时默认拉线会复位板子；\n'
+            '勾选后打开串口立即松开两根线。对 loop:// 等虚拟端口自动忽略')
+        self.chk_dtr_neutral.setChecked(
+            read_setting('connect/dtr_rts_neutral', '0') in ('1', 'true', 'yes'))
+        self.chk_dtr_neutral.toggled.connect(lambda on: write_setting(
+            'connect/dtr_rts_neutral', '1' if on else '0'))
+        self.chk_auto_reconnect = QtWidgets.QCheckBox('断线自动重连（每 2 秒重试，设备重插后自动接回）')
+        self.chk_auto_reconnect.setToolTip(
+            '运行中串口异常时不立刻断开，后台每 2s 按原参数重试；\n'
+            '适配烧录后 COM 重枚举、板子自动复位等场景')
+        self.chk_auto_reconnect.setChecked(
+            read_setting('connect/auto_reconnect', '0') in ('1', 'true', 'yes'))
+        self.chk_auto_reconnect.toggled.connect(lambda on: write_setting(
+            'connect/auto_reconnect', '1' if on else '0'))
+
         # ---- 烧录：STM32CubeProgrammer CLI 路径（预留，默认空=自动探测） ----
         self.edit_cli = QtWidgets.QLineEdit(read_setting(STM32_CLI_PATH_KEY, ''))
         self.edit_cli.setReadOnly(True)
@@ -78,6 +96,9 @@ class SettingsPage(QtWidgets.QWidget):
         layout.addLayout(appearance_row)
         layout.addWidget(QtWidgets.QLabel('波形'))
         layout.addWidget(self.chk_fill)
+        layout.addWidget(QtWidgets.QLabel('连接（ESP32）'))
+        layout.addWidget(self.chk_dtr_neutral)
+        layout.addWidget(self.chk_auto_reconnect)
         layout.addWidget(QtWidgets.QLabel('烧录'))
         layout.addLayout(cli_row)
         layout.addStretch(1)
