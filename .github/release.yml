@@ -1,0 +1,22 @@
+# GitHub 自动生成 release notes 的分类规则（changelog 标签 → 分区）
+changelog:
+  exclude:
+    labels:
+      - ignore-release
+  categories:
+    - title: ✨ 新特性
+      labels:
+        - enhancement
+        - feature
+    - title: 🛠 修复
+      labels:
+        - bug
+        - fix
+    - title: 📄 文档与工程
+      labels:
+        - documentation
+        - ci
+        - build
+    - title: 其他
+      labels:
+        - "*"
