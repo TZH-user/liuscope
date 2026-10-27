@@ -3183,7 +3183,7 @@ def test_theme_custom_and_pages():
     print('THEME CUSTOM + PAGES OK')
 
 
-def run_selftest(frozen: bool = False) -> int:
+def run_selftest(frozen: bool = False, only: str | None = None) -> int:
     import os
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     from selftest_esp32_link import groups as _esp32_link_groups
@@ -3232,11 +3232,30 @@ def run_selftest(frozen: bool = False) -> int:
     # 冻结冒烟（--selftest-exit）：windowed onefile exe 无控制台；这些组会以 sys.executable
     # 再起子进程（冻结时那是本 exe 自身 → 卡死）或访问外网——剔除。
     frozen_unsafe = {test_headless, test_stm32_fake_cli, test_update_check}
+    _log_path = os.environ.get('SELFTEST_LOG')
+    _logf = open(_log_path, 'a', encoding='utf-8') if _log_path else None
+
+    def _trace(msg: str):
+        print(msg, flush=True)
+        if _logf:
+            _logf.write(f'[{time.strftime("%H:%M:%S")}] {msg}\n')
+            _logf.flush()
+    if only:
+        # 诊断/子集运行：逗号分隔组名；冻结冒烟用于二分定位挂起组
+        wanted = {n.strip() for n in only.split(',') if n.strip()}
+        groups = [fn for fn in groups if fn.__name__ in wanted]
+    _trace(f'RUN_SELFTEST frozen={frozen} only={only!r} groups={len(groups)}')
     for fn in groups:
         if frozen and fn in frozen_unsafe:
-            print(f'{fn.__name__}: SKIP（冻结冒烟子集）')
+            _trace(f'{fn.__name__}: SKIP（冻结冒烟子集）')
             continue
-        fn()
+        _trace(f'{fn.__name__} ...')
+        try:
+            fn()
+        except BaseException as exc:
+            _trace(f'{fn.__name__}: RAISED {type(exc).__name__}: {exc}')
+            raise
+    _trace('QT_SPIKE_SELFTEST_OK')
     print('QT_SPIKE_SELFTEST_OK')
     return 0
 

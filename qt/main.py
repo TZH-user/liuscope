@@ -30,11 +30,13 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    if '--selftest' in sys.argv:
+    only = None
+    for arg in sys.argv:
+        if arg.startswith('--selftest-only='):
+            only = arg.split('=', 1)[1]
+    if '--selftest' in sys.argv or only or '--selftest-exit' in sys.argv:
+        # --selftest-exit = 冻结打包冒烟（冻结安全子集，退出码门禁）
+        # --selftest-only=a,b = 组子集（诊断/定点回归；配 --selftest-exit 可在冻结下跑）
         from selftest import run_selftest
-        sys.exit(run_selftest())
-    if '--selftest-exit' in sys.argv:
-        # 冻结打包冒烟：只跑冻结安全子集，以退出码表达结果（windowed exe 无控制台输出）
-        from selftest import run_selftest
-        sys.exit(run_selftest(frozen=True))
+        sys.exit(run_selftest(frozen='--selftest-exit' in sys.argv, only=only))
     sys.exit(main())
