@@ -37,6 +37,7 @@ from ui.settings_page import SettingsPage
 from ui.spectrum_panel import SpectrumPanel
 from ui.stm32_panel import Stm32Panel
 from ui import theme
+from ui.device_screen import DeviceScreenPage
 from ui.wave_window import WaveWindow
 
 NEWLINE_TEXT = {'无': '', 'LF': '\n', 'CR': '\r', 'CRLF': '\r\n'}
@@ -254,7 +255,7 @@ class MainWindow(QtWidgets.QMainWindow):
         terminal_layout.addWidget(self.log, 1)
         terminal_layout.addLayout(bottom)
 
-        # ---- 页签：终端 / 波形 / 频谱 / Modbus / 设置 / 关于 ----
+        # ---- 页签：终端 / 波形 / 频谱 / Modbus / STM32 / 设备屏 / 设置 / 关于 ----
         self.wave = WaveWindow()
         # 场景预设要读写主窗体波特率（只改选择不重连，对齐主线）
         self.wave.baud_getter = self.combo_baud.currentText
@@ -265,6 +266,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.modbus.log_fn = self._append_log
         self.stm32 = Stm32Panel()
         self.stm32.log_fn = self._append_log
+        self.device_screen = DeviceScreenPage()   # v2 M2：设备屏（UDP H.264 投屏，只读）
         self.settings_page = SettingsPage(self.wave)
         self.about_page = self._build_about_page()
         self.tabs = QtWidgets.QTabWidget()
@@ -273,6 +275,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.spectrum, '频谱')
         self.tabs.addTab(self.modbus, 'Modbus')
         self.tabs.addTab(self.stm32, 'STM32')
+        self.tabs.addTab(self.device_screen, '设备屏')
         self.tabs.addTab(self.settings_page, '设置')
         self.tabs.addTab(self.about_page, '关于')
         self.tabs.setObjectName('main_tabs')
@@ -933,6 +936,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wave.stop_timers()
         self.spectrum.stop_timers()
         self.stm32.shutdown()
+        self.device_screen.shutdown()   # v2：设备屏收流/解码线程收尾
         self._stop_file_send('窗口关闭')
         self._teardown_worker()
         super().closeEvent(event)
