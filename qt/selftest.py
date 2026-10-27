@@ -2923,6 +2923,171 @@ def test_main_tabs_integration():
 
 
 
+def test_net_serial_url():
+    """v2 M1①：网络串口 URL 直通——serial_for_url 全链（loop:// 回环）+ 可编辑端口下拉。
+
+    不需要硬件：loop:// 是 pyserial 内建回环 URL，写进去的字节立刻回读。
+    验证：下拉可手输 URL → 连接成功 → UI 发送经 URL 端口回显进 RX 日志 → 断开干净。
+    """
+    from PySide6 import QtWidgets
+
+    import ui.main_window as mw
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    saved = _snapshot_settings(_CONNECT_KEYS)
+    win = mw.MainWindow()
+    win.show()
+    win._port_watch_timer.stop()
+    received = []
+    try:
+        assert win.combo_port.isEditable(), '端口下拉应可编辑（网络串口 URL 直输）'
+        win.combo_port.setCurrentText('loop://')
+        win.combo_baud.setCurrentText('115200')
+        win.btn_connect.click()
+        assert _pump_until(app, lambda: win.worker is not None
+                              and win._connected_device == 'loop://'), 'URL 直连应成功'
+        win.worker.got_bytes.connect(received.append)
+        win.edit_send.setText('HELLO-URL')
+        win.send()
+        assert _pump_until(app, lambda: any(b'HELLO-URL' in chunk for chunk in received)), \
+            f'loop:// 应回显发送内容，实际收到 {received!r}'
+        assert win.rx_bytes_total >= len('HELLO-URL\n'), 'RX 统计应累计回环字节'
+        btn = win.btn_connect
+        btn.click()
+        assert _pump_until(app, lambda: win.worker is None), '断开应干净'
+    finally:
+        win._port_watch_timer.stop()
+        win.close()
+        _restore_settings(saved)  # closeEvent 会回写 connect/*，这里还原
+    print('NET SERIAL URL OK')
+
+
+def test_device_screen():
+    """v2 M2①：设备屏解码渲染原型——libx264 合成流 → MTU=1200 切包 UDP 回环 →
+    H264UdpSource（拆头/重组 NAL/丢包统计）→ VideoDecoder（AU 组包/软解/耗时统计）→
+    ScreenGLWidget 渲染。
+
+    断言：解出 ≥25 帧、帧尺寸 320x240、丢包 0、解码 0 错、seq 跳变触发 resync_needed。
+    渲染断言说明：QT_QPA_PLATFORM=offscreen 无 GL 上下文（QOpenGLWidget: Failed to
+    create context，Qt 回退纯色 pixmap，画面恒为单色），因此 grab() 内容断言在离屏下
+    降级为「不崩溃 + 非空 + 帧计数正确」；GL 直通路径的真实渲染需窗口平台人工/脚本验证。
+    """
+    import os
+    import socket
+    import struct
+    import tempfile
+    from fractions import Fraction
+
+    import numpy as np
+    from PySide6 import QtWidgets
+
+    from ui.device_screen import H264UdpSource, split_nals
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+
+    # ---- 1) PyAV libx264 编码合成流：320x240、30 帧移动色块、baseline 无 B 帧、Annex-B ----
+    import av
+    tmp_dir = tempfile.mkdtemp(prefix='qt_devicescreen_')
+    h264_path = os.path.join(tmp_dir, 'synthetic.h264')
+    w, h, n_frames, fps = 320, 240, 30, 30
+    cont = av.open(h264_path, 'w', format='h264')   # Annex-B 裸流 muxer
+    st = cont.add_stream('libx264', rate=fps)
+    st.width, st.height, st.pix_fmt = w, h, 'yuv420p'
+    st.time_base = Fraction(1, fps)
+    st.options = {'profile': 'baseline', 'tune': 'zerolatency', 'preset': 'ultrafast'}
+    for i in range(n_frames):
+        img = np.zeros((h, w, 3), np.uint8)
+        x = (i * 8) % (w - 40)
+        img[100:140, x:x + 40] = (0, 200, 80)       # 移动色块：保证帧间有变化
+        img[:, :8] = i * 8 % 256                    # 亮度条随帧递增：帧内容可区分
+        for pkt in st.encode(av.VideoFrame.from_ndarray(img, format='bgr24')):
+            cont.mux(pkt)
+    for pkt in st.encode():
+        cont.mux(pkt)
+    cont.close()
+    stream = open(h264_path, 'rb').read()
+    assert stream.count(b'\x00\x00\x00\x01') >= n_frames, 'Annex-B 起始码应存在'
+    nals = split_nals(stream)
+    assert any(nal[4] & 0x1F == 7 for nal in nals), '应含 SPS'
+    assert any(nal[4] & 0x1F == 5 for nal in nals), '应含 IDR'
+
+    # ---- 2) 丢包统计 / NAL 重组纯逻辑（不经 socket 直喂数据报） ----
+    src = H264UdpSource(0)
+    resyncs = []
+    src.resync_needed.connect(resyncs.append)
+    assert src._process_datagram(struct.pack('>IIB', 0, 0, 1) + b'\x00' * 3) == b''
+    assert src._process_datagram(struct.pack('>IIB', 2, 0, 0) + b'\x00' * 3) == b''
+    assert src.lost_count == 1 and resyncs == [0], 'seq 跳 1 应记丢 1 包并触发 resync'
+    # 起始码切包落在 NAL 中间（MTU 切包常态）：跨数据报重组
+    nal_a = nals[0]
+    mid = len(nal_a) // 2
+    out = src._process_datagram(struct.pack('>IIB', 3, 0, 0) + nal_a[:mid])
+    assert out == b'', '半 NAL 不应提前吐出'
+    out = src._process_datagram(struct.pack('>IIB', 4, 0, 0) + nal_a[mid:])
+    assert out == b'', '无下一起始码前 NAL 悬着（完整性未知）'
+    out = src._process_datagram(struct.pack('>IIB', 5, 0, 0) + b'\x00\x00\x00\x01\x65\x88')
+    assert out == nal_a, f'下一 NAL 起始码到达时应吐出重组完整的前一 NAL: {out!r}'
+    assert src.late_count == 0 and src.dup_count == 0
+
+    # ---- 3) 端到端：页面起管线 → UDP 回环发流 → 解码断言 ----
+    from ui.device_screen import DeviceScreenPage
+
+    page = DeviceScreenPage()
+    page.show()
+    port = 29202 + os.getpid() % 200    # 避免与其他测试进程端口冲突
+    page.spin_port.setValue(port)
+    page.btn_start.click()
+    assert _pump_until(app, lambda: page.source is not None and page.source.is_bound), \
+        'UDP 源应绑定成功'
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    seq = 0
+    for off in range(0, len(stream), 1200):     # MTU=1200 切包（可落在 NAL 中间）
+        head = struct.pack('>IIB', seq, off, 1 if seq == 0 else 0)
+        sock.sendto(head + stream[off:off + 1200], ('127.0.0.1', port))
+        seq += 1
+    sock.close()
+
+    def _frame_size():
+        return page.decoder.last_size if page.decoder else None
+
+    assert _pump_until(app, lambda: page.decoder is not None
+                       and page.decoder.frame_count >= 25, timeout_s=15), \
+        f'解码帧数不足: {page.decoder.frame_count if page.decoder else "无解码器"}'
+    page.decoder.drain()                         # 收口最后一帧 AU
+    app.processEvents()
+    dec = page.decoder
+    assert dec.frame_count >= 25
+    assert _frame_size() == (320, 240), f'帧尺寸应为 320x240，实际 {_frame_size()}'
+    assert dec.decode_errors == 0, f'解码错误 {dec.decode_errors}'
+    assert dec.avg_decode_ms is not None and dec.avg_decode_ms >= 0
+    assert page.source.lost_count == 0, '回环不应丢包'
+    assert page.source.packet_count == seq, '应收到全部数据报'
+    page._update_stats()
+    assert 'fps' in page.lbl_fps.text() and '解码' in page.lbl_dec.text()
+    assert page.lbl_lost.text() == '丢包 0'
+
+    # ---- 4) 渲染区 grab（offscreen 降级断言，原因见 docstring）----
+    app.processEvents()
+    pix = page.gl_widget.grab()
+    assert not pix.isNull() and pix.width() > 50 and pix.height() > 50, '渲染区 grab 应非空'
+    img = pix.toImage()
+    colors = {img.pixelColor(x, y).name()
+              for x in range(0, pix.width(), max(1, pix.width() // 16))
+              for y in range(0, pix.height(), max(1, pix.height() // 16))}
+    if len(colors) > 1:
+        print(f'  (设备屏 GL 渲染出内容: {len(colors)} 种采样色)')
+    else:
+        print('  (offscreen 无 GL 上下文：grab 为纯色兜底，降级断言帧计数)')
+
+    # ---- 5) 停止收尾 ----
+    page.btn_start.click()
+    assert page.source is None and page.decoder is None, '停止应回收收流/解码线程'
+    page.shutdown()                              # 幂等收尾
+    page.close()
+    print('DEVICE SCREEN OK')
+
+
 def run_selftest(frozen: bool = False) -> int:
     import os
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
