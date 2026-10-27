@@ -2915,44 +2915,53 @@ def test_main_tabs_integration():
     print('MAIN TABS INTEGRATION OK')
 
 
-def run_selftest() -> int:
+def run_selftest(frozen: bool = False) -> int:
     import os
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-    test_rx_buffer()
-    test_hexutil()
-    test_main_window()
-    test_terminal_chrome()
-    test_ports_watch()
-    test_connect_lock()
-    test_find_time_mode()
-    test_auto_log_export()
-    test_log_hover()
-    test_fault_decode_and_ai_doc()
-    test_wave_presets()
-    test_xy_view()
-    test_session_record()
-    test_control_channel()
-    test_headless()
-    test_wave_protocols()
-    test_wave_window()
-    test_main_window_m3()
-    test_modbus_core()
-    test_modbus_panel()
-    test_update_check()
-    test_update_ui()
-    test_spectrum_dsp()
-    test_spectrum_panel()
-    # ---- 集成收口阶段新增组（自 _verify/*.py 有价值验证并入）----
-    test_connect_button_states()
-    test_tx_alignment_and_hover()
-    test_wave_display_and_hover()
-    test_xy_new_params()
-    test_spectrum_axis_sync_export()
-    test_theme_switching()
-    test_theme_contrast()
-    test_ai_channel_extended()
-    test_stm32_fake_cli()
-    test_main_tabs_integration()
+    groups = [
+        test_rx_buffer,
+        test_hexutil,
+        test_main_window,
+        test_terminal_chrome,
+        test_ports_watch,
+        test_connect_lock,
+        test_find_time_mode,
+        test_auto_log_export,
+        test_log_hover,
+        test_fault_decode_and_ai_doc,
+        test_wave_presets,
+        test_xy_view,
+        test_session_record,
+        test_control_channel,
+        test_headless,
+        test_wave_protocols,
+        test_wave_window,
+        test_main_window_m3,
+        test_modbus_core,
+        test_modbus_panel,
+        test_update_check,
+        test_update_ui,
+        test_spectrum_dsp,
+        test_spectrum_panel,
+        test_connect_button_states,
+        test_tx_alignment_and_hover,
+        test_wave_display_and_hover,
+        test_xy_new_params,
+        test_spectrum_axis_sync_export,
+        test_theme_switching,
+        test_theme_contrast,
+        test_ai_channel_extended,
+        test_stm32_fake_cli,
+        test_main_tabs_integration,
+    ]
+    # 冻结冒烟（--selftest-exit）：windowed onefile exe 无控制台；这些组会以 sys.executable
+    # 再起子进程（冻结时那是本 exe 自身 → 卡死）或访问外网——剔除。
+    frozen_unsafe = {test_headless, test_stm32_fake_cli, test_update_check}
+    for fn in groups:
+        if frozen and fn in frozen_unsafe:
+            print(f'{fn.__name__}: SKIP（冻结冒烟子集）')
+            continue
+        fn()
     print('QT_SPIKE_SELFTEST_OK')
     return 0
 

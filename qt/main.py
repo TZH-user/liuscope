@@ -33,4 +33,8 @@ if __name__ == '__main__':
     if '--selftest' in sys.argv:
         from selftest import run_selftest
         sys.exit(run_selftest())
+    if '--selftest-exit' in sys.argv:
+        # 冻结打包冒烟：只跑冻结安全子集，以退出码表达结果（windowed exe 无控制台输出）
+        from selftest import run_selftest
+        sys.exit(run_selftest(frozen=True))
     sys.exit(main())
