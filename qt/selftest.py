@@ -3091,6 +3091,8 @@ def test_device_screen():
 def run_selftest(frozen: bool = False) -> int:
     import os
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from selftest_esp32_link import groups as _esp32_link_groups
+    from selftest_esp32_log import groups as _esp32_log_groups
     groups = [
         test_rx_buffer,
         test_hexutil,
@@ -3128,6 +3130,8 @@ def run_selftest(frozen: bool = False) -> int:
         test_main_tabs_integration,
         test_net_serial_url,
         test_device_screen,
+        *_esp32_link_groups(),
+        *_esp32_log_groups(),
     ]
     # 冻结冒烟（--selftest-exit）：windowed onefile exe 无控制台；这些组会以 sys.executable
     # 再起子进程（冻结时那是本 exe 自身 → 卡死）或访问外网——剔除。
