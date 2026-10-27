@@ -2745,7 +2745,7 @@ sys.exit(0)
     try:
         app.processEvents()
         titles = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-        assert titles == ['终端', '波形', '频谱', 'Modbus', 'STM32', '设备屏', '设置', '关于'], \
+        assert titles == ['终端', '波形', '频谱', 'Modbus', 'STM32', 'Linux 支持', '设置', '关于'], \
             str(titles)
         panel = win.stm32
         assert panel.runner.cli_path == fake_bat, panel.runner.cli_path
@@ -2903,7 +2903,7 @@ def test_main_tabs_integration():
     try:
         app.processEvents()
         texts = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-        assert texts == ['终端', '波形', '频谱', 'Modbus', 'STM32', '设备屏', '设置', '关于'], \
+        assert texts == ['终端', '波形', '频谱', 'Modbus', 'STM32', 'Linux 支持', '设置', '关于'], \
             str(texts)
         for i, name in enumerate(texts):   # 逐页签切换 + 渲染非空
             win.tabs.setCurrentIndex(i)
@@ -3105,6 +3105,84 @@ def test_device_screen():
     print('DEVICE SCREEN OK')
 
 
+
+def test_theme_custom_and_pages():
+    """v1.3.0 外观标准化：自定义主题（六键改色+对比度警示+重启保持）+ 页面显隐记忆。"""
+    from PySide6 import QtWidgets
+
+    import ui.main_window as mw
+    from core.settings import read_setting, write_setting
+    from ui import theme
+    from ui.settings_page import SHOW_SCREEN_KEY, SHOW_STM32_KEY
+
+    saved = _snapshot_settings(('ui/theme', theme.CUSTOM_COLORS_KEY,
+                                theme.CUSTOM_BASE_KEY, SHOW_STM32_KEY, SHOW_SCREEN_KEY))
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = mw.MainWindow()
+    win.show()
+    win._port_watch_timer.stop()
+    try:
+        combo = win.settings_page.combo_theme
+        if combo.currentData() != 'dark':   # 统一深色基线（ini 可能残留）
+            combo.setCurrentIndex(combo.findData('dark'))
+            app.processEvents()
+
+        # ---- 页面显隐：设置页开关 ↔ 页签可见性 + ini 记忆 ----
+        win.settings_page.chk_show_stm32.setChecked(False)
+        win.settings_page.chk_show_screen.setChecked(False)
+        assert not win.tabs.isTabVisible(win.tabs.indexOf(win.stm32)), 'STM32 页应隐藏'
+        assert not win.tabs.isTabVisible(win.tabs.indexOf(win.device_screen)),             'Linux 支持页应隐藏'
+        assert read_setting(SHOW_STM32_KEY, '') == '0', '显隐应写设置记忆'
+        win.settings_page.chk_show_stm32.setChecked(True)
+        assert win.tabs.isTabVisible(win.tabs.indexOf(win.stm32)), '重新勾选应恢复显示'
+
+        # ---- 自定义主题 ----
+        idx = combo.findData('custom')
+        assert idx >= 0, '主题下拉应含「自定义」'
+        combo.setCurrentIndex(idx)
+        app.processEvents()
+        assert theme.current_theme() == 'custom'
+        assert not win.settings_page.custom_box.isHidden(), '自定义主题下应展开配色面板'
+
+        win.settings_page.apply_custom_color('window', '#401010')
+        assert theme.color('window') == '#401010', '改色应即时生效'
+        assert '#401010' in app.styleSheet(), '全局 QSS 应包含新底色'
+        assert '401010' in read_setting(theme.CUSTOM_COLORS_KEY, ''), '改色应写设置记忆'
+
+        win.settings_page.apply_custom_color('text', '#401010')   # 文字与底同色
+        assert theme.custom_palette_issues(theme.palette('custom')), '同色文字应触发复核警示'
+        assert '对比度不足' in win.settings_page.lbl_contrast.text(), '警示应上屏'
+
+        win.settings_page._reset_custom()
+        assert win.settings_page.lbl_contrast.text() == '', '恢复默认后警示清空'
+        assert theme.color('window') == theme.color('window', 'dark'), '应回到深色基准'
+
+        combo.setCurrentIndex(combo.findData('dark'))
+        app.processEvents()
+        assert theme.current_theme() == 'dark'
+        assert win.settings_page.custom_box.isHidden(), '非自定义下配色面板应收起'
+
+        # ---- 重启保持：ui/theme=custom + 已存覆盖 → 新实例恢复自定义配色 ----
+        win.settings_page.apply_custom_color('window', '#123456')
+        write_setting('ui/theme', 'custom')
+        win.close()
+        win2 = mw.MainWindow()
+        win2._port_watch_timer.stop()
+        try:
+            assert theme.current_theme() == 'custom', '启动应按 ini 恢复自定义主题'
+            assert theme.color('window') == '#123456', '自定义覆盖应跨重启保持'
+        finally:
+            win2.close()
+        win = None
+    finally:
+        if win is not None:
+            win._port_watch_timer.stop()
+            win.close()
+        _restore_settings(saved)
+        theme.set_theme('dark')   # 测试基线复位（后续组不串色）
+    print('THEME CUSTOM + PAGES OK')
+
+
 def run_selftest(frozen: bool = False) -> int:
     import os
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -3142,6 +3220,7 @@ def run_selftest(frozen: bool = False) -> int:
         test_spectrum_axis_sync_export,
         test_theme_switching,
         test_theme_contrast,
+        test_theme_custom_and_pages,
         test_ai_channel_extended,
         test_stm32_fake_cli,
         test_main_tabs_integration,

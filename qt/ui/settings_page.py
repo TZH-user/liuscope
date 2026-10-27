@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
-"""设置页签：主题（深色/浅色，即时生效 + 写 gui_settings_qt.ini 记忆）、
+"""设置页签：主题（深色/浅色/自定义，即时生效 + 写 gui_settings_qt.ini 记忆）、
+自定义配色（外观标准化六键：窗口背景/控件底/正文文字/强调色/日志底/日志文字，
+WCAG 对比度即时复核并警示）、页面显示（STM32/Linux 支持页显隐记忆）、
 「曲线填充」开关（迁自波形页工具行，读写波形页同款设置键）、
-STM32CubeProgrammer CLI 路径预留（文件选择器 + 记忆，默认空=自动探测，
-下一阶段 STM32 页会读该设置键）。
+STM32CubeProgrammer CLI 路径预留（文件选择器 + 记忆，默认空=自动探测）。
 
 与波形页衔接：填充开关直接读写 wave_window.FILL_SETTING_KEY（wave/fill_under，
 主线口径仅显式 'false' 关），变更后调用 wave.apply_fill_from_setting() 立即生效。
 """
 from __future__ import annotations
 
-from PySide6 import QtWidgets
+import json
+
+from PySide6 import QtGui, QtWidgets
 
 from core.settings import read_setting, write_setting
 from ui import theme
@@ -17,15 +20,18 @@ from ui.wave_window import FILL_SETTING_KEY
 
 THEME_SETTING_KEY = 'ui/theme'          # 主题记忆键（theme.apply_saved_theme 读回）
 STM32_CLI_PATH_KEY = 'stm32_cli_path'   # CubeProgrammer CLI 路径键（默认空=自动探测）
+SHOW_STM32_KEY = 'ui/show_stm32'        # 页面显隐记忆键
+SHOW_SCREEN_KEY = 'ui/show_screen'      # （缺省显示；主窗监听 toggled 应用）
 
 
 class SettingsPage(QtWidgets.QWidget):
-    """设置页：外观（主题）/ 波形（曲线填充）/ 烧录（STM32 CLI 路径预留）。"""
+    """设置页：外观（主题/自定义配色）/ 页面显示 / 波形 / 连接（ESP32）/ 烧录。"""
 
     def __init__(self, wave=None, parent=None):
         super().__init__(parent)
         self.wave = wave   # 波形页引用：填充开关变更后让其立即生效（测试可注入替身）
         self._syncing = False
+        self._custom_overrides: dict = self._load_overrides()
 
         # ---- 外观：主题 ----
         self.combo_theme = QtWidgets.QComboBox()
@@ -40,6 +46,62 @@ class SettingsPage(QtWidgets.QWidget):
         appearance_row.addWidget(QtWidgets.QLabel('主题'))
         appearance_row.addWidget(self.combo_theme)
         appearance_row.addStretch(1)
+
+        # ---- 外观：自定义配色（仅自定义主题下显示） ----
+        self.custom_box = QtWidgets.QWidget()
+        custom_lay = QtWidgets.QVBoxLayout(self.custom_box)
+        custom_lay.setContentsMargins(0, 0, 0, 0)
+        custom_lay.setSpacing(6)
+
+        base_row = QtWidgets.QHBoxLayout()
+        base_row.addWidget(QtWidgets.QLabel('基准主题（曲线色/绘图区继承基准）'))
+        self.combo_custom_base = QtWidgets.QComboBox()
+        self.combo_custom_base.addItem('深色', theme.DARK_KEY)
+        self.combo_custom_base.addItem('浅色', theme.LIGHT_KEY)
+        self.combo_custom_base.setCurrentIndex(self.combo_custom_base.findData(
+            read_setting(theme.CUSTOM_BASE_KEY, theme.DARK_KEY)))
+        self.combo_custom_base.currentIndexChanged.connect(self._on_custom_base_changed)
+        base_row.addWidget(self.combo_custom_base)
+        base_row.addStretch(1)
+        custom_lay.addLayout(base_row)
+
+        self._color_buttons: dict[str, QtWidgets.QPushButton] = {}
+        color_grid = QtWidgets.QGridLayout()
+        color_grid.setHorizontalSpacing(12)
+        for i, (key, label) in enumerate(theme.CUSTOM_EDITABLE.items()):
+            btn = QtWidgets.QPushButton(label)
+            btn.setObjectName('tool')
+            btn.setFixedWidth(110)
+            btn.clicked.connect(lambda _=False, k=key: self._pick_color(k))
+            self._color_buttons[key] = btn
+            color_grid.addWidget(btn, i // 3, i % 3)
+        custom_lay.addLayout(color_grid)
+
+        self.lbl_contrast = QtWidgets.QLabel('')
+        self.lbl_contrast.setObjectName('status_err')
+        self.lbl_contrast.setWordWrap(True)
+        custom_lay.addWidget(self.lbl_contrast)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_reset_custom = QtWidgets.QPushButton('恢复默认配色')
+        btn_reset_custom.setObjectName('tool')
+        btn_reset_custom.setToolTip('清空全部自定义覆盖，回到基准主题原配色')
+        btn_reset_custom.clicked.connect(self._reset_custom)
+        btn_row.addWidget(btn_reset_custom)
+        btn_row.addStretch(1)
+        custom_lay.addLayout(btn_row)
+        self.custom_box.setVisible(theme.current_theme() == theme.CUSTOM_KEY)
+        self._refresh_custom_ui()
+
+        # ---- 页面显示（显隐记忆，主窗监听后 setTabVisible） ----
+        self.chk_show_stm32 = QtWidgets.QCheckBox('显示 STM32 页（CubeProgrammer 烧录）')
+        self.chk_show_stm32.setChecked(read_setting(SHOW_STM32_KEY, '1') != '0')
+        self.chk_show_stm32.toggled.connect(lambda on: write_setting(
+            SHOW_STM32_KEY, '1' if on else '0'))
+        self.chk_show_screen = QtWidgets.QCheckBox('显示 Linux 支持页（设备屏投屏）')
+        self.chk_show_screen.setChecked(read_setting(SHOW_SCREEN_KEY, '1') != '0')
+        self.chk_show_screen.toggled.connect(lambda on: write_setting(
+            SHOW_SCREEN_KEY, '1' if on else '0'))
 
         # ---- 波形：曲线填充（读写波形页原设置键，主线口径缺省开） ----
         self.chk_fill = QtWidgets.QCheckBox('曲线填充（曲线下方同色浅填充）')
@@ -94,6 +156,10 @@ class SettingsPage(QtWidgets.QWidget):
         layout.setSpacing(10)
         layout.addWidget(QtWidgets.QLabel('外观'))
         layout.addLayout(appearance_row)
+        layout.addWidget(self.custom_box)
+        layout.addWidget(QtWidgets.QLabel('页面显示'))
+        layout.addWidget(self.chk_show_stm32)
+        layout.addWidget(self.chk_show_screen)
         layout.addWidget(QtWidgets.QLabel('波形'))
         layout.addWidget(self.chk_fill)
         layout.addWidget(QtWidgets.QLabel('连接（ESP32）'))
@@ -113,6 +179,69 @@ class SettingsPage(QtWidgets.QWidget):
             return
         write_setting(THEME_SETTING_KEY, str(key))
         theme.set_theme(str(key))
+        self.custom_box.setVisible(key == theme.CUSTOM_KEY)
+        if key == theme.CUSTOM_KEY:
+            self._refresh_custom_ui()
+
+    # ---------- 自定义配色 ----------
+
+    def _load_overrides(self) -> dict:
+        try:
+            data = json.loads(read_setting(theme.CUSTOM_COLORS_KEY, '') or '{}')
+        except (ValueError, TypeError):
+            return {}
+        return {k: v for k, v in data.items()
+                if k in theme.CUSTOM_EDITABLE and isinstance(v, str)}
+
+    def _pick_color(self, key: str):
+        current = theme.palette('custom').get(key, '#000000')
+        color = QtWidgets.QColorDialog.getColor(
+            QtGui.QColor(current), self, f'选择{theme.CUSTOM_EDITABLE[key]}')
+        if not color.isValid():
+            return
+        self.apply_custom_color(key, color.name())
+
+    def apply_custom_color(self, key: str, hex_color: str):
+        """程序化改色入口（测试/脚本共用）：更新覆盖 → 主题模块重刷 → 界面联动。"""
+        self._custom_overrides[key] = hex_color
+        issues = theme.set_custom_colors(
+            self._custom_overrides, app=QtWidgets.QApplication.instance())
+        self._refresh_custom_ui()
+        self._show_contrast_issues(issues)
+
+    def _on_custom_base_changed(self, index: int):
+        base = self.combo_custom_base.itemData(index)
+        if not base:
+            return
+        issues = theme.set_custom_colors(
+            self._custom_overrides, base=str(base),
+            app=QtWidgets.QApplication.instance())
+        self._refresh_custom_ui()
+        self._show_contrast_issues(issues)
+
+    def _reset_custom(self):
+        self._custom_overrides = {}
+        issues = theme.set_custom_colors(
+            {}, base=str(self.combo_custom_base.currentData()),
+            app=QtWidgets.QApplication.instance())
+        self._refresh_custom_ui()
+        self._show_contrast_issues(issues)
+
+    def _refresh_custom_ui(self):
+        """取色按钮底色/文字色跟随当前自定义配色，警示文案重算。"""
+        p = theme.palette('custom')
+        for key, btn in self._color_buttons.items():
+            fg, bg = p['text'], p[key]
+            btn.setStyleSheet(
+                f'QPushButton#tool {{ background: {bg}; color: {fg}; }}')
+        if not self.custom_box.isHidden():
+            self._show_contrast_issues(theme.custom_palette_issues(p))
+
+    def _show_contrast_issues(self, issues: list):
+        if issues:
+            self.lbl_contrast.setText('⚠ 对比度不足: ' + '；'.join(w for w, _ in issues))
+        else:
+            self.lbl_contrast.setText('')
 
     # ---------- 曲线填充（与波形页同键） ----------
 

@@ -326,11 +326,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.spectrum, '频谱')
         self.tabs.addTab(self.modbus, 'Modbus')
         self.tabs.addTab(self.stm32, 'STM32')
-        self.tabs.addTab(self.device_screen, '设备屏')
+        self.tabs.addTab(self.device_screen, 'Linux 支持')
         self.tabs.addTab(self.settings_page, '设置')
         self.tabs.addTab(self.about_page, '关于')
         self.tabs.setObjectName('main_tabs')
         self.setCentralWidget(self.tabs)
+        # 页面显隐（设置页记忆，v1.3.0）：STM32 / Linux 支持可关，重启保持
+        self.settings_page.chk_show_stm32.toggled.connect(lambda _on: self._apply_page_visibility())
+        self.settings_page.chk_show_screen.toggled.connect(lambda _on: self._apply_page_visibility())
+        self._apply_page_visibility()
 
         find_shortcut = QtGui.QShortcut(QtGui.QKeySequence('Ctrl+F'), terminal)
         find_shortcut.activated.connect(self.find_bar.open_and_focus)
@@ -384,6 +388,15 @@ class MainWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(3000, self._maybe_auto_update_check)
 
     # ---------- 设置记忆（gui_settings_qt.ini：口/波特率/收发格式/换行/自动连接） ----------
+
+    def _apply_page_visibility(self):
+        """按设置页开关显隐可选页签（STM32 / Linux 支持），隐藏页对象保留不销毁。"""
+        vis = ((self.stm32, self.settings_page.chk_show_stm32.isChecked()),
+               (self.device_screen, self.settings_page.chk_show_screen.isChecked()))
+        for page, shown in vis:
+            idx = self.tabs.indexOf(page)
+            if idx >= 0:
+                self.tabs.setTabVisible(idx, shown)
 
     def _wire_settings_memory(self):
         self.combo_baud.currentTextChanged.connect(

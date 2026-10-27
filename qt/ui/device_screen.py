@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""设备屏页（v2 M2 原型）：UDP 收 H.264 裸流 → PyAV 软解 → QOpenGLWidget 渲染 + 统计。
+"""Linux 支持页（v1.3.0 更名，原「设备屏」v2 M2 原型）：UDP 收 H.264 裸流 → PyAV 软解 → QOpenGLWidget 渲染 + 统计。
 
 协议（docs/设计_Linux设备互联_v2.md §4 视频面）：UDP 9202，包 =
 [seq u32 LE][ts_ms u32 LE][flags u8][payload]，payload 为任意切分的 Annex-B 字节流
@@ -443,7 +443,7 @@ class ScreenGLWidget(QOpenGLWidget):
 
 
 class DeviceScreenPage(QtWidgets.QWidget):
-    """「设备屏」页：工具行（开始/停止 + UDP 端口 + 状态）+ 渲染区 + 统计行。
+    """「Linux 支持」页：工具行（开始/停止 + UDP 端口 + 状态）+ 渲染区 + 统计行。
 
     管线：H264UdpSource(QThread) --got_nals(queued)--> VideoDecoder(解码线程)
           --frame_ready(queued)--> ScreenGLWidget（只显最新帧）。
