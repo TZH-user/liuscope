@@ -71,3 +71,37 @@ sudo systemctl restart ser2net
 验收（对齐设计稿 M1）：LiuScope 串口页以 `rfc2217://` 连接后，收发行为与本地 COM 口一致；
 `loop://` 回环全链已在 selftest `NET SERIAL URL` 组覆盖。M2 起串口透传由 server 内置
 （`serial_bridge`，与配对鉴权统一），ser2net 方案保留并存。
+
+## RK3562(鲁班猫)Linux 板上架记录(2026-10-28)
+
+**板端状态:server-rk 已部署并验证**(部署走调试串口带外通道,详见 `_verify/rk_console.py` /
+`_verify/rk_deploy_serial.py`;登录凭据不落库,问用户要)。
+
+| 项 | 状态 |
+|---|---|
+| 系统 | Debian 12,Python 3.11.2,主机名 lubancat,用户 cat |
+| 网口 | eth0 静态 192.168.137.2/24(上次 ICS 遗留);本次运行时追加 192.168.1.50/24;**物理层故障待换线**(对端只广播 10baseT,RX 全死) |
+| 串口调试 | COM19(USB-TTL CH340)@ **1500000**;打开即松 DTR/RTS |
+| server-rk | ~/server_rk/(0.2.0-m2),pyserial 3.5 装在 ~/.local;板上自检全绿 + TCP 9201 协议握手(hello 挑战)通过 |
+| ffmpeg | 5.1.6(Debian 版)**无 h264_rkmpp 编码器**——M2 视频联调需先落 libx264 回退或装 nyanmisaka ffmpeg-rkmpp |
+| uinput | /dev/uinput 存在但 root-only(uinput=False,注入降级,M3 处理) |
+| KMS | /dev/dri card0/card1 + renderD128/129 ✓ |
+
+**重要踩坑:RK FIQ 调试器**
+
+1. 串口输入流中出现字面量 **`fiq`** 三连字符 → 内核 FIQ 调试器立即劫持控制台
+   (打 "Welcome to irq debugger mode",bash 从此收不到输入,命令全部被吞)。
+   处置:`console` 命令交还;传输编码必须保证线上永不出现该子串
+   (rk_deploy_serial.py 用字母表置换 f→!、i→#、q→^,板端 `tr '!#^' 'f'i'q'` 还原——
+   还原命令自身也要拆词!)。
+2. 串口 BREAK 会触发 FIQ 调试器(SysRq 尝试的副产物);长时间空闲也可能进入 debug 模式。
+3. 控制台交互一律 expect 式(等模式出现再发下一步),固定延时必错拍。
+
+**网络修复后的一键验收**(网线换好/ICS 开启后):
+
+```bash
+# 板端
+cd ~ && sudo python3 -m server_rk --verbose    # 配对码缺省 246810
+# PC 端:LiuScope「Linux 支持」页填板子 IP(192.168.1.50 或 192.168.137.2)+ 配对码;
+# 串口页 rfc2217://192.168.1.50:7000(需先装 ser2net,样例见 ser2net.yaml.example)
+```
