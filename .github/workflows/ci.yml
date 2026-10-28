@@ -37,7 +37,7 @@ jobs:
       - name: 安装依赖
         run: pip install PySide6 pyqtgraph numpy pyserial pyinstaller
       - name: PyInstaller 单文件打包
-        run: python -m PyInstaller --noconfirm --onefile --windowed --paths qt --name liuscope --icon qt/assets/liuscope.ico --add-data "qt/assets;assets" qt/main.py
+        run: python -m PyInstaller --noconfirm --onefile --windowed --paths qt --name liuscope --icon qt/assets/liuscope.ico --add-data "qt/assets;assets" --collect-submodules serial qt/main.py
       - name: 打包产物冒烟（冻结安全子集，退出码门禁）
         env:
           QT_QPA_PLATFORM: offscreen

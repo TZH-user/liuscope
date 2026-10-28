@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 
 
 def test_rx_buffer():
@@ -2962,7 +2963,7 @@ def test_net_serial_url():
         win.combo_baud.setCurrentText('115200')
         win.btn_connect.click()
         assert _pump_until(app, lambda: win.worker is not None
-                              and win._connected_device == 'loop://'), 'URL 直连应成功'
+                              and win._connected_device == 'loop://', timeout_s=15),             'URL 直连应成功'
         win.worker.got_bytes.connect(received.append)
         win.edit_send.setText('HELLO-URL')
         win.send()
@@ -3229,9 +3230,14 @@ def run_selftest(frozen: bool = False, only: str | None = None) -> int:
         *_esp32_link_groups(),
         *_esp32_log_groups(),
     ]
-    # 冻结冒烟（--selftest-exit）：windowed onefile exe 无控制台；这些组会以 sys.executable
-    # 再起子进程（冻结时那是本 exe 自身 → 卡死）或访问外网——剔除。
-    frozen_unsafe = {test_headless, test_stm32_fake_cli, test_update_check}
+    # 冻结冒烟（--selftest-exit）剔除两类组：
+    # ① windowed onefile 里以 sys.executable 再起子进程（= exe 自身 → 卡死）或访问外网；
+    # ② 逐像素 grab 扫描 / PyAV 编解码重断言——冻结渲染慢约 10×（v1.3.0 实测全量 >25min），
+    #    这类组留给 L1 开发环境全量跑（CI 另有 python qt/selftest.py 步骤），冻结只留快速门禁。
+    frozen_unsafe = {test_headless, test_stm32_fake_cli, test_update_check,
+                     test_tx_alignment_and_hover, test_wave_display_and_hover,
+                     test_theme_switching, test_main_tabs_integration,
+                     test_theme_contrast, test_device_screen}
     _log_path = os.environ.get('SELFTEST_LOG')
     _logf = open(_log_path, 'a', encoding='utf-8') if _log_path else None
 

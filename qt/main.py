@@ -4,6 +4,7 @@
 运行：  python qt/main.py
 自测：  python qt/main.py --selftest   （离屏 QT_QPA_PLATFORM=offscreen 亦可跑）
 """
+import os
 import sys
 from pathlib import Path
 
@@ -38,5 +39,12 @@ if __name__ == '__main__':
         # --selftest-exit = 冻结打包冒烟（冻结安全子集，退出码门禁）
         # --selftest-only=a,b = 组子集（诊断/定点回归；配 --selftest-exit 可在冻结下跑）
         from selftest import run_selftest
-        sys.exit(run_selftest(frozen='--selftest-exit' in sys.argv, only=only))
+        try:
+            rc = run_selftest(frozen='--selftest-exit' in sys.argv, only=only)
+        except BaseException:
+            # windowed 冻结 exe 异常退出会在解释器收尾挂死——硬退非零码给 CI 门禁
+            import traceback
+            traceback.print_exc()
+            os._exit(1)
+        sys.exit(rc)
     sys.exit(main())

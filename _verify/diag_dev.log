@@ -1,0 +1,3 @@
+[08:07:45] RUN_SELFTEST frozen=False only='test_rx_buffer' groups=1
+[08:07:45] test_rx_buffer ...
+[08:07:45] QT_SPIKE_SELFTEST_OK

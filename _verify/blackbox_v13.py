@@ -38,7 +38,7 @@ def main() -> int:
 
     # 01 通道健康
     pong = rpc(c, {'cmd': 'ping'})
-    check('01 ping', pong.get('ok') is True and pong.get('pong') is True, str(pong))
+    check('01 ping', pong.get('ok') is True and pong.get('tool') == 'LiuScope', str(pong))
 
     # 02 状态含 v1.3.0 版本号
     st = rpc(c, {'cmd': 'status'})
