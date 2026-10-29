@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 
-from PySide6 import QtWidgets
+from PySide6 import QtGui, QtWidgets
 
 import pyqtgraph as pg
 
@@ -140,8 +140,43 @@ LIGHT = dict(
 )
 
 
+def mono_font() -> QtGui.QFont:
+    """日志主区等宽字体（Windows 命中 Consolas，其余平台按族名回落 FixedFont）。
+
+    字符画/框线图/HEX 列/IDF 时间戳对齐都按终端「1 字符=1 格」网格排的，
+    全局比例字体（YaHei UI）里空格窄、'\\' '/' 宽度各异，画必然压扁歪斜。
+    CJK 字形 Qt 自动回落回 YaHei UI，中文阅读不受影响。注意必须经 QSS
+    (#log_view) 注入而不是 setFont——样式表字体优先级压过控件字体。
+    无 QGuiApplication（theme 被纯逻辑测试在建 app 前导入）时不查字体库，
+    返回空族占位字体——QFontDatabase 静态接口无 app 会原生崩溃；真正套用
+    的 set_theme 都在 app 在位后重解析，届时族名补齐。
+    """
+    font = QtGui.QFont()
+    font.setFixedPitch(True)
+    font.setStyleHint(QtGui.QFont.StyleHint.Monospace)
+    if QtGui.QGuiApplication.instance() is None:
+        return font
+    try:
+        families = set(QtGui.QFontDatabase.families())
+    except (AttributeError, TypeError):   # 旧版 PySide6 需实例化后取
+        families = set(QtGui.QFontDatabase().families())
+    for fam in ('Consolas', 'Cascadia Mono', 'Menlo', 'DejaVu Sans Mono', 'Courier New'):
+        if fam in families:
+            font = QtGui.QFont(fam)
+            font.setFixedPitch(True)
+            font.setStyleHint(QtGui.QFont.StyleHint.Monospace)
+            break
+    else:
+        font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+    return font
+
+
 def _build_qss(p: dict) -> str:
     """由配色字典模板化生成全局 QSS（深浅两套同构，选择器与旧深色版一致）。"""
+    mono_family = mono_font().family()
+    mono_rule = (f"/* 日志主区等宽：#id 选择器优先级压过 QWidget 全局字体，字号仍级联 9pt */\n"
+                 f"QPlainTextEdit#log_view {{ font-family: '{mono_family}'; }}\n"
+                 if mono_family else '')
     return f"""
 QMainWindow, QWidget {{ background: {p['window']}; color: {p['text']};
                        font-family: 'Microsoft YaHei UI'; font-size: 9pt; }}
@@ -151,6 +186,7 @@ QComboBox QAbstractItemView {{ background: {p['control']}; color: {p['text']};
                               selection-background-color: {p['accent']}; }}
 QPlainTextEdit, QTextEdit {{ background: {p['log_bg']}; color: {p['log_text']};
                             border: 1px solid {p['log_border']}; border-radius: 4px; }}
+{mono_rule}
 QPushButton {{ background: {p['accent']}; color: white; border: none;
               border-radius: 4px; padding: 6px 14px; }}
 QPushButton:hover {{ background: {p['accent_hover']}; }}
@@ -193,8 +229,22 @@ QToolTip {{ background: {p['control']}; color: {p['text']}; border: 1px solid {p
 """
 
 
-DARK_QSS = _build_qss(DARK)   # 兼容旧引用（main.py / 各验证脚本）
-LIGHT_QSS = _build_qss(LIGHT)
+def __getattr__(name: str):
+    """懒生成 QSS 兼容常量（PEP 562）：导入期不构建 QSS。
+
+    theme 会在 QApplication 之前被导入（selftest 组函数内 import ui 的顺序
+    就是先 import 后建 app），模块级 _build_qss 会让 mono_font 无 app 查
+    QFontDatabase 原生崩溃。改为首次访问时构建——届时调用方（set_theme/
+    自测组/验证脚本）基本都已建 app；无 app 访问也安全（mono 规则缺省省略）。
+    """
+    if name == 'DARK_QSS':
+        value = _build_qss(DARK)
+    elif name == 'LIGHT_QSS':
+        value = _build_qss(LIGHT)
+    else:
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+    globals()[name] = value   # 缓存为真属性，后续访问不再走本钩子
+    return value
 
 # 日志行配色（模块级：set_theme 切主题时同步更新；main_window 每次追加日志动态读取，
 # 旧日志行保留当时的颜色，新行用新色）

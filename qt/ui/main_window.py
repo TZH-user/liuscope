@@ -201,10 +201,14 @@ class MainWindow(QtWidgets.QMainWindow):
         # 只增不减，长跑高流量会到 GB 级）；QPlainTextEdit 由 C++ 侧 maximumBlockCount
         # 自动裁剪且内存有界（同载荷 15s +2.5MB vs +50MB），appendHtml 保留彩色着色。
         self.log = QtWidgets.QPlainTextEdit()
+        self.log.setObjectName('log_view')   # QSS #log_view → 等宽字体（theme.mono_font）
         self.log.setReadOnly(True)
         self.log.setUndoRedoEnabled(False)
         self.log.setMaximumBlockCount(self._max_log_blocks)
-        self.log.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
+        # 自动折行到视口宽：长行/长 HEX 串不再只出横向滚动条，窗口缩放即时重排；
+        # WrapAtWordBoundaryOrAnywhere 优先按空格断，无空格长串（HEX）按字符断。
+        self.log.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.log.setWordWrapMode(QtGui.QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         # 注意：这里不能再挂控件级静态 tooltip——Qt 会先弹它，抢掉逐行
         # HEX⇄文本转换提示框（LogHoverTip，0.4s 延迟）。
         self._log_hover = LogHoverTip(self.log)

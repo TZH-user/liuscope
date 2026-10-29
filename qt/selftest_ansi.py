@@ -196,5 +196,75 @@ def test_ansi_render_ui():
     print('ANSI RENDER UI OK')
 
 
+def test_log_wrap_mono_art():
+    """日志显示网格:等宽字体(字符画不歪)+视口宽自动折行+窗口缩放自适应重排
+    + 真机 motd 猫画逐字节保真(前导/行内多空格不塌)。
+
+    背景:鲁班猫 motd 猫画(/etc/update-motd.d/00-header)按终端 1 字符=1 格
+    网格排,旧版日志区继承全局比例字体(YaHei UI)且 NoWrap——画被压扁歪斜、
+    长行只出横向滚动条。修复后网格对齐靠等宽字体,文本本身本来就零损耗。
+    """
+    from PySide6 import QtCore, QtGui, QtWidgets
+
+    import ui.main_window as mw
+    from ui import theme
+    from selftest import _CONNECT_KEYS, _restore_settings, _snapshot_settings
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    saved = _snapshot_settings(_CONNECT_KEYS)
+    win = None
+    try:
+        win = mw.MainWindow()
+        win._port_watch_timer.stop()
+
+        # 等宽字体经 QSS(#log_view) 生效:控件字体与文档默认字体都要命中。
+        # 注意 QSS 解析出的 QFont 只带 family 不带 fixedPitch 标志，等宽与否
+        # 要问 QFontInfo（真实字体引擎）而不是 QFont.fixedPitch()。
+        mono_fam = theme.mono_font().family()
+        win.log.ensurePolished()
+        assert win.log.font().family() == mono_fam, win.log.font().family()
+        assert QtGui.QFontInfo(win.log.font()).fixedPitch(), \
+            f'QSS 解析出的 {win.log.font().family()} 应为真实等宽字体'
+        assert win.log.document().defaultFont().family() == mono_fam, \
+            win.log.document().defaultFont().family()
+
+        # 折行配置:视口宽折行 + 无空格长串按字符断(HEX 不再横向滚丢)
+        assert win.log.lineWrapMode() == QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth
+        assert win.log.wordWrapMode() == QtGui.QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere
+
+        # 真机 motd 猫画行原样字节保真:前导 11 空格 + 行内 24 空格一个不能少
+        art = '\x1b[1;34m' + ' ' * 11 + 'OOOO' + ' ' * 24 + 'OOOO\x1b[0m'
+        win._append_log('RX', art)
+        b = _find_block(win.log, 'OOOO')
+        assert b is not None, '猫画行必须落显'
+        assert (' ' * 11 + 'OOOO' + ' ' * 24 + 'OOOO') in b.text(), repr(b.text())
+
+        # 折行 + 自适应重排：超视口宽的长行折多行，拉宽窗口后重排回单行。
+        # 坑1：日志视口宽由布局管理——缩放必须缩顶层窗口，直接 resize 日志控件无效。
+        # 坑2：主窗有最小宽度钳制（顶行控件撑的），行长按当前视口宽动态取，不写死像素。
+        win.show()
+        fm = QtGui.QFontMetrics(win.log.font())
+        adv = fm.horizontalAdvance('A')
+        w0 = win.log.viewport().width()
+        assert w0 > 0 and adv > 0
+        win._append_log('RX', 'A' * (int(w0 / adv) + 20))
+        blk = _find_block(win.log, 'AAAA')
+        layout = win.log.document().documentLayout()
+        app.processEvents()
+        layout.blockBoundingRect(blk)   # 强制排版该块(QPlainTextDocumentLayout)
+        assert blk.lineCount() > 1, '超视口宽的长行应折行'
+        win.resize(QtCore.QSize(win.width() * 2, win.height()))
+        app.processEvents()
+        layout.blockBoundingRect(blk)
+        assert blk.lineCount() == 1, '拉宽后应自适应重排回单行'
+    finally:
+        if win is not None:
+            win._port_watch_timer.stop()
+            win.close()
+        _restore_settings(saved)
+    print('LOG WRAP MONO ART OK')
+
+
 def groups():
-    return [test_ansi_render_core, test_ansi_palette_contrast, test_ansi_render_ui]
+    return [test_ansi_render_core, test_ansi_palette_contrast, test_ansi_render_ui,
+            test_log_wrap_mono_art]

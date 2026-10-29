@@ -6,7 +6,8 @@
 ## [Unreleased]
 
 ### 新增
-- **ANSI 终端渲染**（日志区新开关「ANSI 渲染」，默认开，设置键 `log/ansi_render`）：串口回传的 SGR 转义按设备指定着色——16 色（按日志底色明暗自动切深/浅两套端末调色板，鲁班猫等 Linux 串口控制台、ESP-IDF 日志色码直接受益）、256 色、真彩；粗体/斜体/下划线/删除线/反显/暗淡生效；清屏、光标移动、OSC 标题、字符集切换等对滚动日志无意义的序列自动剥除。渲染以字符格式直插文档：文本零损耗（查找 / 悬停 HEX⇄文本互转按原文工作），空格天然保排版——框线图与 ASCII 艺术字不再塌陷；设备指定色对日志底对比度 <2.0 时朝文字色混合保底。条目原文与自动保存日志始终记录原始解码结果（含转义码）。新增 `qt/core/ansi_render.py`（纯逻辑段解析）与自测 3 组（全量 48 组）；视觉证据 `_verify/evidence/ansi_render_{dark,light}.png`（复现：`_verify/ansi_demo_shot.py`）
+- **日志区等宽字体 + 自动折行**（字符画错位与长行横滚问题的根治）：日志主区经 QSS `#log_view` 切等宽字体（`theme.mono_font()`，Windows 命中 Consolas，CJK 字形 Qt 自动回落 YaHei UI）——字符画/框线图/HEX 列/IDF 时间戳按终端「1 字符=1 格」网格对齐，鲁班猫 motd 猫画不再被全局比例字体压歪；折行从 NoWrap 改 WidgetWidth + `WrapAtWordBoundaryOrAnywhere`——长行/长 HEX 串超出视口宽自动断到下一行，窗口缩放即时重排。注意字体必须走 QSS 注入：样式表字体优先级压过 `setFont`；`theme` 模块会在建 QApplication 前被导入，`DARK_QSS/LIGHT_QSS` 兼容常量改 PEP 562 懒生成（模块级 `_build_qss` 在无 app 时调 `QFontDatabase` 会原生崩溃）。自测扩至 49 组（新增 `test_log_wrap_mono_art`：等宽命中/折行配置/缩放重排/猫画逐字节保真）；视觉证据 `_verify/evidence/ansi_motd_art_mono.png`（复现：`_verify/ansi_motd_art_shot.py`，内嵌板上 00-header 渲染真字节）
+- **ANSI 终端渲染**（日志区新开关「ANSI 渲染」，默认开，设置键 `log/ansi_render`）：串口回传的 SGR 转义按设备指定着色——16 色（按日志底色明暗自动切深/浅两套端末调色板，鲁班猫等 Linux 串口控制台、ESP-IDF 日志色码直接受益）、256 色、真彩；粗体/斜体/下划线/删除线/反显/暗淡生效；清屏、光标移动、OSC 标题、字符集切换等对滚动日志无意义的序列自动剥除。渲染以字符格式直插文档：文本零损耗（查找 / 悬停 HEX⇄文本互转按原文工作），空格天然保排版——框线图与 ASCII 艺术字不再塌陷；设备指定色对日志底对比度 <2.0 时朝文字色混合保底。条目原文与自动保存日志始终记录原始解码结果（含转义码）。新增 `qt/core/ansi_render.py`（纯逻辑段解析）与自测 3 组；视觉证据 `_verify/evidence/ansi_render_{dark,light}.png`（复现：`_verify/ansi_demo_shot.py`）
 
 ### 修复
 - 对比度审计脚本页签清单未随 v1.3「Linux 支持」页更新（7→8）导致无法运行，已修正（现覆盖 436 项，两主题 0 违规）
