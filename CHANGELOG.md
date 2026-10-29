@@ -6,6 +6,14 @@
 ## [Unreleased]
 
 ### 新增
+- **多会话窗口 + 广播发送（P2，多口并行监控）**：多会话以「一窗一会话」落地（MobaXterm split-tab 的等效工程口径——MainWindow 整窗即会话，`_LIVE_WINDOWS` 注册表编号标题，Ctrl+N/「新窗口」再开一口；每口独立 worker/日志/波形/频谱与设置记忆，AI 控制通道按既有口径首窗独占端口）；「广播」勾选后发送同步转发到其他**已连接**窗口（各自落 TX 日志与字节统计、一跳不回环、未连接跳过；`tx/broadcast` 记忆）。自测扩至 61 组（+多窗口广播 1 组）。注：单窗内页签化会话（SessionView 抽取）列为后续项——现有 61 组自测面全部绑定 MainWindow 属性面，整页签重构收益/风险比不划算
+
+- **日志显示与操控增强（P0 批次）**：RX 关键词高亮/告警（`core/rx_highlight.py` 纯逻辑 + 设置页双表，alert 红/watch 琥珀、剥转义匹配、用户意图优先）；日志区 Ctrl+滚轮/Ctrl+=/-/0 字号缩放（`ui/log_view.py`，字号必须同时落到 document.defaultFont——控件级 QSS 只改 size 时正文仍按旧字号排版，FontChange 事件挂钩防主题切换丢缩放）；BREAK 发送 + CTS/DSR/RI/CD 信号线 500ms 轮询显示；窗口置顶、选中即复制（PuTTY 风格）、时间戳 clock/elapsed 双模式。新增 `ui/log_view.py`（LogView 控件承载等宽+缩放）与自测 5 组
+- **序列发送（P1）**：`core/tx_sequence.py`（send/sendhex/delay 解析 + QTimer 驱动 Runner：重复/循环/写失败中止）+ `ui/tx_sequence_dialog.py` 非模态对话框（脚本/重复/自动执行记忆于 txseq/*）；连接后自动执行适配自动重连场景。新增自测 2 组
+- **XMODEM/YMODEM 发送（P1）**：`core/xmodem.py` 发送端状态机（XMODEM 128B 块 CRC/checksum 自适应、YMODEM 批传输块0 文件名+大小/1024B 块/EOT/空块收尾；NAK 重发上限 10 次、tick 超时、CAN 取消；CRC16-CCITT 向量 0x31C3 锚定）；文件发送协议下拉（原样/XMODEM/YMODEM），引擎经 ingest 喂应答字节、完成/中断落 SYS 日志。新增自测 4 组（含仿真对端整环 + 主窗 UI 集成环回）
+- **正则查找（P1）**：查找条新增 `.*` 开关（re.IGNORECASE，弱高亮上限 500 同时间模式口径；无效正则给提示不崩；勾选时时刻定位停用）。自测并入显示组
+- **修复：日志区光标选区破坏 bug（存量）**——用户在日志留有选中区时，`_append_log`/TX 缩进取的是带选区的控件光标，`insertText` 会把新数据替换进选区（毁日志、吞选中）。现统一先 movePosition(End)+clearSelection 再插入；qol 自测的复制用例覆盖此路径
+
 - **日志区等宽字体 + 自动折行**（字符画错位与长行横滚问题的根治）：日志主区经 QSS `#log_view` 切等宽字体（`theme.mono_font()`，Windows 命中 Consolas，CJK 字形 Qt 自动回落 YaHei UI）——字符画/框线图/HEX 列/IDF 时间戳按终端「1 字符=1 格」网格对齐，鲁班猫 motd 猫画不再被全局比例字体压歪；折行从 NoWrap 改 WidgetWidth + `WrapAtWordBoundaryOrAnywhere`——长行/长 HEX 串超出视口宽自动断到下一行，窗口缩放即时重排。注意字体必须走 QSS 注入：样式表字体优先级压过 `setFont`；`theme` 模块会在建 QApplication 前被导入，`DARK_QSS/LIGHT_QSS` 兼容常量改 PEP 562 懒生成（模块级 `_build_qss` 在无 app 时调 `QFontDatabase` 会原生崩溃）。自测扩至 49 组（新增 `test_log_wrap_mono_art`：等宽命中/折行配置/缩放重排/猫画逐字节保真）；视觉证据 `_verify/evidence/ansi_motd_art_mono.png`（复现：`_verify/ansi_motd_art_shot.py`，内嵌板上 00-header 渲染真字节）
 - **ANSI 终端渲染**（日志区新开关「ANSI 渲染」，默认开，设置键 `log/ansi_render`）：串口回传的 SGR 转义按设备指定着色——16 色（按日志底色明暗自动切深/浅两套端末调色板，鲁班猫等 Linux 串口控制台、ESP-IDF 日志色码直接受益）、256 色、真彩；粗体/斜体/下划线/删除线/反显/暗淡生效；清屏、光标移动、OSC 标题、字符集切换等对滚动日志无意义的序列自动剥除。渲染以字符格式直插文档：文本零损耗（查找 / 悬停 HEX⇄文本互转按原文工作），空格天然保排版——框线图与 ASCII 艺术字不再塌陷；设备指定色对日志底对比度 <2.0 时朝文字色混合保底。条目原文与自动保存日志始终记录原始解码结果（含转义码）。新增 `qt/core/ansi_render.py`（纯逻辑段解析）与自测 3 组；视觉证据 `_verify/evidence/ansi_render_{dark,light}.png`（复现：`_verify/ansi_demo_shot.py`）
 

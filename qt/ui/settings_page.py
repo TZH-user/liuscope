@@ -102,6 +102,42 @@ class SettingsPage(QtWidgets.QWidget):
         self.chk_show_screen.setChecked(read_setting(SHOW_SCREEN_KEY, '1') != '0')
         self.chk_show_screen.toggled.connect(lambda on: write_setting(
             SHOW_SCREEN_KEY, '1' if on else '0'))
+        self.chk_on_top = QtWidgets.QCheckBox('窗口置顶')
+        self.chk_on_top.setToolTip('总在最前（台架看日志常用）；主窗监听本开关即时应用')
+        self.chk_on_top.setChecked(read_setting('ui/on_top', '0') in ('1', 'true', 'yes'))
+        self.chk_on_top.toggled.connect(lambda on: write_setting(
+            'ui/on_top', '1' if on else '0'))
+
+        # ---- 日志：关键词高亮 / 选中即复制 / 时间戳模式 ----
+        self.edit_kw_alert = QtWidgets.QLineEdit(read_setting('log/kw_alert', ''))
+        self.edit_kw_alert.setPlaceholderText('如: error, assert, fail, over temp')
+        self.edit_kw_alert.setToolTip(
+            '错误关键词，逗号或空格分隔：RX 行命中任一词整行红色加粗。\n'
+            '大小写不敏感；匹配剥掉 ANSI 转义后的文本；关键词色优先于设备色（用户意图优先）。'
+            '立即生效，无需重启')
+        self.edit_kw_alert.editingFinished.connect(lambda: write_setting(
+            'log/kw_alert', self.edit_kw_alert.text().strip()))
+        self.edit_kw_watch = QtWidgets.QLineEdit(read_setting('log/kw_watch', ''))
+        self.edit_kw_watch.setPlaceholderText('如: retry, timeout, warning')
+        self.edit_kw_watch.setToolTip(
+            '关注关键词，逗号或空格分隔：RX 行命中任一词整行琥珀色（弱于错误级）。\n'
+            '与错误关键词同时命中按错误级处理')
+        self.edit_kw_watch.editingFinished.connect(lambda: write_setting(
+            'log/kw_watch', self.edit_kw_watch.text().strip()))
+        self.chk_copy_on_select = QtWidgets.QCheckBox('选中日志即复制（PuTTY 风格）')
+        self.chk_copy_on_select.setToolTip(
+            '鼠标选中的日志文本立即进剪贴板（拖选过程持续同步）；默认关')
+        self.chk_copy_on_select.setChecked(
+            read_setting('log/copy_on_select', '0') in ('1', 'true', 'yes'))
+        self.chk_copy_on_select.toggled.connect(lambda on: write_setting(
+            'log/copy_on_select', '1' if on else '0'))
+        self.chk_elapsed_stamp = QtWidgets.QCheckBox('时间戳显示为连接起的相对秒数')
+        self.chk_elapsed_stamp.setToolTip(
+            '开 = 每行时间戳是 [xx.xxxs]（自连接/重连起算，对齐示波器口径）；\n'
+            '关 = 全时刻 [YYYY-MM-DD HH:MM:SS.mmm]（默认；导出与 Ctrl+F 时间定位用它）')
+        self.chk_elapsed_stamp.setChecked(read_setting('log/stamp_mode', 'clock') == 'elapsed')
+        self.chk_elapsed_stamp.toggled.connect(lambda on: write_setting(
+            'log/stamp_mode', 'elapsed' if on else 'clock'))
 
         # ---- 波形：曲线填充（读写波形页原设置键，主线口径缺省开） ----
         self.chk_fill = QtWidgets.QCheckBox('曲线填充（曲线下方同色浅填充）')
@@ -160,6 +196,18 @@ class SettingsPage(QtWidgets.QWidget):
         layout.addWidget(QtWidgets.QLabel('页面显示'))
         layout.addWidget(self.chk_show_stm32)
         layout.addWidget(self.chk_show_screen)
+        layout.addWidget(self.chk_on_top)
+        layout.addWidget(QtWidgets.QLabel('日志'))
+        kw_row1 = QtWidgets.QHBoxLayout()
+        kw_row1.addWidget(QtWidgets.QLabel('错误关键词'))
+        kw_row1.addWidget(self.edit_kw_alert, 1)
+        kw_row2 = QtWidgets.QHBoxLayout()
+        kw_row2.addWidget(QtWidgets.QLabel('关注关键词'))
+        kw_row2.addWidget(self.edit_kw_watch, 1)
+        layout.addLayout(kw_row1)
+        layout.addLayout(kw_row2)
+        layout.addWidget(self.chk_copy_on_select)
+        layout.addWidget(self.chk_elapsed_stamp)
         layout.addWidget(QtWidgets.QLabel('波形'))
         layout.addWidget(self.chk_fill)
         layout.addWidget(QtWidgets.QLabel('连接（ESP32）'))

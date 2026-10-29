@@ -21,7 +21,7 @@ from core import APP_NAME, APP_VERSION, REPO_URL
 from core.ai_doc import get_control_channel_doc
 from core.auto_log import AutoLogWriter, build_log_export_text, format_entry_block, get_log_dir
 from core.control_channel import ControlAPI, ControlChannel, handle_control_request
-from core import ansi_render, esp_idf_log
+from core import ansi_render, esp_idf_log, rx_highlight
 from core.fault_decode import test_fault_dump_line
 from core.hexutil import bytes_to_hex_text, try_parse_hex_text
 from core.port_hints import port_open_error_hint
@@ -30,6 +30,7 @@ from core.ports import (port_display_text, port_display_text_full,
                         scan_port_infos, scan_port_infos_full)
 from core.rx_buffer import RxBuffer
 from core.serial_worker import SerialWorker
+from core.xmodem import XmodemSender, YmodemSender
 from core.session_record import SessionRecorder, load_replay_chunks
 from core.settings import read_setting, write_setting
 from core.update_check import RELEASES_PAGE, check_app_update
@@ -37,16 +38,21 @@ from ui.backtrace_dialog import BacktraceDialog
 from ui.find_bar import FindBar
 from ui.history_edit import HistoryLineEdit
 from ui.log_hover import LogHoverTip
+from ui.log_view import LogView
 from ui.modbus_panel import ModbusPanel
 from ui.settings_page import SettingsPage
 from ui.spectrum_panel import SpectrumPanel
 from ui.stm32_panel import Stm32Panel
+from ui.tx_sequence_dialog import TxSequenceDialog
 from ui import theme
 from ui.device_screen import DeviceScreenPage
 from ui.wave_window import WaveWindow
 
 NEWLINE_TEXT = {'无': '', 'LF': '\n', 'CR': '\r', 'CRLF': '\r\n'}
 NEWLINE_BYTES = {'无': b'', 'LF': b'\n', 'CR': b'\r', 'CRLF': b'\r\n'}
+
+# 多会话窗口注册表：每窗口=独立串口会话（各自 worker/日志/页面），广播发送与标题编号用
+_LIVE_WINDOWS: list = []
 
 # AI 通道 settings_set/get 的键别名（英文键 + 中文常用名 → 规范键）
 _SETTING_ALIASES = {
@@ -115,7 +121,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # 启动主题恢复（读设置键 ui/theme，缺省深色）：先于各页创建，
         # pyqtgraph 控件即按主题背景/前景初始化（main.py 的深色 QSS 由这里覆盖统一）
         theme.apply_saved_theme(QtWidgets.QApplication.instance())
-        self.setWindowTitle(f'{APP_NAME} v{APP_VERSION}')
         self.resize(980, 620)
 
         self.buffer = RxBuffer()
@@ -149,6 +154,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_baud.addItems(['2000000', '1500000', '921600', '460800', '115200', '74880'])
         self.btn_connect = QtWidgets.QPushButton('连接')
         self.btn_connect.clicked.connect(self.toggle_connect)
+        self.btn_new_window = QtWidgets.QPushButton('新窗口')
+        self.btn_new_window.setObjectName('tool')
+        self.btn_new_window.setToolTip(
+            '再开一个会话窗口（Ctrl+N）：每个窗口独立连接一个串口，'
+            '各有自己的日志/波形/频谱页；配合「广播」可同时给多块板子发命令')
+        self.btn_new_window.clicked.connect(self._open_new_session_window)
         self.btn_refresh = QtWidgets.QPushButton('刷新串口')
         self.btn_refresh.clicked.connect(self.refresh_ports)
 
@@ -173,7 +184,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_rts.setCheckable(True)
         self.btn_rts.setToolTip('手动拉高/松开 RTS（ESP32 电路：EN 复位）')
         self.btn_rts.toggled.connect(lambda on: self._esp32_line('rts', on))
-        for btn in (self.btn_mc_reset, self.btn_download, self.btn_dtr, self.btn_rts):
+        self.btn_break = QtWidgets.QPushButton('BREAK')
+        self.btn_break.setObjectName('tool')
+        self.btn_break.setToolTip('发送串口 BREAK 信号（部分板子靠它进 bootloader / 唤醒）')
+        self.btn_break.clicked.connect(self._send_break)
+        self.lbl_lines = QtWidgets.QLabel('')
+        self.lbl_lines.setObjectName('backlog')
+        self.lbl_lines.setToolTip('modem 状态线实时状态（●有效 / ○无效）：CTS DSR RI CD')
+        for btn in (self.btn_mc_reset, self.btn_download, self.btn_dtr, self.btn_rts,
+                    self.btn_break):
             btn.setEnabled(False)   # 未连接置灰，连接后在 _update_connect_button 里启用
 
         self.chk_auto_link = QtWidgets.QCheckBox('新设备自动连接')
@@ -193,6 +212,7 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(self.combo_baud, 1)
         top.addWidget(self.chk_auto_link)
         top.addWidget(self.btn_connect)
+        top.addWidget(self.btn_new_window)
         top.addWidget(self.lbl_status, 2)
         top.addWidget(self.lbl_stats, 1)
 
@@ -200,8 +220,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # QTextEdit 的 QTextDocument 在 append+裁剪循环下碎片内存不归还（实测 ~1.2KB/行
         # 只增不减，长跑高流量会到 GB 级）；QPlainTextEdit 由 C++ 侧 maximumBlockCount
         # 自动裁剪且内存有界（同载荷 15s +2.5MB vs +50MB），appendHtml 保留彩色着色。
-        self.log = QtWidgets.QPlainTextEdit()
-        self.log.setObjectName('log_view')   # QSS #log_view → 等宽字体（theme.mono_font）
+        self.log = LogView()
         self.log.setReadOnly(True)
         self.log.setUndoRedoEnabled(False)
         self.log.setMaximumBlockCount(self._max_log_blocks)
@@ -209,6 +228,17 @@ class MainWindow(QtWidgets.QMainWindow):
         # WrapAtWordBoundaryOrAnywhere 优先按空格断，无空格长串（HEX）按字符断。
         self.log.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.log.setWordWrapMode(QtGui.QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        # 关键词高亮/告警：两表缓存 + 原始串脏检查（设置页改完下一行 RX 即生效）
+        self._kw_raw: tuple[str, str] | None = None
+        self._kw_alert: list[str] = []
+        self._kw_watch: list[str] = []
+        # 选中即复制（PuTTY 风格，默认关）：设置键 log/copy_on_select
+        self.log.selectionChanged.connect(self._copy_selection_maybe)
+        # modem 状态线轮询（连接期间 500ms；_on_connected 启动、断开停止）
+        self._line_timer = QtCore.QTimer(self)
+        self._line_timer.setInterval(500)
+        self._line_timer.timeout.connect(self._poll_line_signals)
+        self._conn_mono: float | None = None   # elapsed 时间戳基准（连接时刻）
         # 注意：这里不能再挂控件级静态 tooltip——Qt 会先弹它，抢掉逐行
         # HEX⇄文本转换提示框（LogHoverTip，0.4s 延迟）。
         self._log_hover = LogHoverTip(self.log)
@@ -267,6 +297,8 @@ class MainWindow(QtWidgets.QMainWindow):
         logbar.addWidget(self.btn_download)
         logbar.addWidget(self.btn_dtr)
         logbar.addWidget(self.btn_rts)
+        logbar.addWidget(self.btn_break)
+        logbar.addWidget(self.lbl_lines)
         logbar.addWidget(self.btn_clear_log)
         logbar.addWidget(self.btn_export_log)
 
@@ -289,13 +321,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_send = QtWidgets.QPushButton('发送')
         self.btn_send.clicked.connect(self.send)
 
+        self.btn_broadcast = QtWidgets.QPushButton('广播')
+        self.btn_broadcast.setObjectName('tool')
+        self.btn_broadcast.setCheckable(True)
+        self.btn_broadcast.setChecked(read_setting('tx/broadcast', '0') in ('1', 'true'))
+        self.btn_broadcast.setToolTip(
+            '发送时同步广播到其他已连接的会话窗口（各自落 TX 日志、各自计数）；\n'
+            '只从本窗口发起一跳，不会二次转发；本窗口未连接时不广播')
+        self.btn_broadcast.toggled.connect(
+            lambda on: write_setting('tx/broadcast', '1' if on else '0'))
+
         self.btn_find = QtWidgets.QPushButton('查找')
         self.btn_find.setObjectName('tool')
         self.btn_find.clicked.connect(self.find_bar.open_and_focus)
 
+        self.combo_file_proto = QtWidgets.QComboBox()
+        self.combo_file_proto.addItems(['原样', 'XMODEM', 'YMODEM'])
+        self.combo_file_proto.setToolTip(
+            '文件发送协议：原样=裸字节流（按块直发）；XMODEM=128 字节块 CRC16；'
+            'YMODEM=批传输（文件名+大小+1024 字节块，STM32 ROM bootloader / U-Boot loady）')
         self.btn_file = QtWidgets.QPushButton('文件发送')
         self.btn_file.setObjectName('tool')
         self.btn_file.clicked.connect(self.toggle_file_send)
+
+        self.btn_seq = QtWidgets.QPushButton('序列')
+        self.btn_seq.setObjectName('tool')
+        self.btn_seq.setToolTip('序列发送：send/sendhex/delay 脚本，支持重复/循环/连接后自动执行')
+        self.btn_seq.clicked.connect(self._open_txseq)
+        self._txseq_dialog: TxSequenceDialog | None = None
 
         self.lbl_backlog = QtWidgets.QLabel('积压 0 B')
         self.lbl_backlog.setObjectName('backlog')
@@ -309,8 +362,10 @@ class MainWindow(QtWidgets.QMainWindow):
         bottom.addWidget(self.combo_newline)
         bottom.addWidget(self.edit_send, 3)
         bottom.addWidget(self.btn_send)
+        bottom.addWidget(self.btn_broadcast)
         bottom.addWidget(self.btn_find)
         bottom.addWidget(self.btn_file)
+        bottom.addWidget(self.btn_seq)
         bottom.addWidget(self.lbl_backlog, 1)
 
         terminal = QtWidgets.QWidget()
@@ -335,6 +390,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stm32.log_fn = self._append_log
         self.device_screen = DeviceScreenPage()   # v2 M2：设备屏（UDP H.264 投屏，只读）
         self.settings_page = SettingsPage(self.wave)
+        self.settings_page.chk_on_top.toggled.connect(self._apply_on_top)
+        self._apply_on_top(self.settings_page.chk_on_top.isChecked())
+        self._register_session_window()
+        sc_new = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.New, self)
+        sc_new.activated.connect(self._open_new_session_window)
         self.about_page = self._build_about_page()
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(terminal, '终端')
@@ -360,6 +420,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.flush_timer.start(self.FLUSH_INTERVAL_MS)
 
         self.file_timer = QtCore.QTimer(self)
+        self._xfer = None   # XMODEM/YMODEM 协议发送状态 {'engine','name'}
+        self._xfer_timer = QtCore.QTimer(self)
+        self._xfer_timer.setInterval(200)
+        self._xfer_timer.timeout.connect(self._xfer_tick)
         self.file_timer.timeout.connect(self._file_send_tick)
         self.file_timer.setInterval(FILE_INTERVAL_MS)
 
@@ -878,6 +942,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     PORT_WATCH_INTERVAL_MS = 2000  # 主线同款 2s 轮询
 
+    def _open_new_session_window(self):
+        """开新会话窗口（Ctrl+N）：独立 MainWindow 实例 = 独立串口会话。"""
+        win = MainWindow()
+        win.show()
+        return win
+
+    def _register_session_window(self):
+        """加入多会话注册表并按序号起标题（会话 1/2/...）。"""
+        _LIVE_WINDOWS.append(self)
+        self.setWindowTitle(f'{APP_NAME} v{APP_VERSION} — 会话 {len(_LIVE_WINDOWS)}')
+
     def refresh_ports(self):
         infos = scan_port_infos_full()
         keep = port_name_from_display(self.combo_port.currentText())
@@ -1021,12 +1096,60 @@ class MainWindow(QtWidgets.QMainWindow):
         if not fn(on):
             self.set_status(f'{which.upper()} 切换失败（端口不支持线控）', 'status_err')
 
+    def _send_break(self):
+        """发送 BREAK：驱动不支持/未连接时按现有线控口径给状态栏提示。"""
+        if self.worker and self.worker.send_break():
+            self._append_log('SYS', '已发送 BREAK 信号')
+        else:
+            self.set_status('BREAK 发送失败（未连接或端口不支持）', 'status_err')
+
+    def _poll_line_signals(self):
+        sigs = self.worker.line_signals() if self.worker else None
+        if not sigs:
+            self.lbl_lines.setText('')
+            return
+        self.lbl_lines.setText(
+            'CTS' + ('●' if sigs['cts'] else '○')
+            + ' DSR' + ('●' if sigs['dsr'] else '○')
+            + ' RI' + ('●' if sigs['ri'] else '○')
+            + ' CD' + ('●' if sigs['cd'] else '○'))
+
+    def _copy_selection_maybe(self):
+        """选中即复制（PuTTY 风格）：拖选过程中持续同步剪贴板，空选不动。"""
+        if read_setting('log/copy_on_select', '0') not in ('1', 'true'):
+            return
+        cur = self.log.textCursor()
+        if cur.hasSelection():
+            QtWidgets.QApplication.clipboard().setText(cur.selectedText())
+
+    def _apply_on_top(self, on: bool):
+        """窗口置顶开关（设置页）：setWindowFlags 需要重新 show 一次才生效。"""
+        hint = QtCore.Qt.WindowType.WindowStaysOnTopHint
+        flags = self.windowFlags()
+        new_flags = (flags | hint) if on else (flags & ~hint)
+        if new_flags != flags:
+            self.setWindowFlags(new_flags)
+            if self.isVisible():
+                self.show()
+
+    def _log_stamp(self) -> str:
+        """时间戳：clock=全时刻（默认，导出/定位依赖它）；elapsed=连接起的相对秒。"""
+        if read_setting('log/stamp_mode', 'clock') == 'elapsed' \
+                and self._conn_mono is not None:
+            return f'{time.monotonic() - self._conn_mono:8.3f}s'
+        return _stamp()
+
     def _on_connected(self):
         # 连接周期归零收发统计（对齐主线 reset_receive_stats 时机）
         self.rx_bytes_total = 0
         self.tx_bytes_total = 0
         self._update_stats_label()
         self._set_connect_params_locked(True)
+        self._conn_mono = time.monotonic()   # elapsed 时间戳基准
+        self._line_timer.start()
+        if read_setting('txseq/auto_run', '0') in ('1', 'true', 'yes'):
+            self._open_txseq()
+            self._txseq_dialog.auto_start()   # 已在跑（重连场景）则不打断
 
     def _set_connect_params_locked(self, locked: bool):
         """连接期间锁定串口协议参数（改口/改波特率须先断开），置灰提示。"""
@@ -1041,7 +1164,8 @@ class MainWindow(QtWidgets.QMainWindow):
         connected = bool(self.worker)
         self.btn_connect.setText('断开' if connected else '连接')
         # ESP32 线控按钮只随连接可用；断开时弹起 DTR/RTS（guard 会拦住对已关口写线）
-        for btn in (self.btn_mc_reset, self.btn_download, self.btn_dtr, self.btn_rts):
+        for btn in (self.btn_mc_reset, self.btn_download, self.btn_dtr, self.btn_rts,
+                    self.btn_break):
             btn.setEnabled(connected)
         if not connected:
             for btn in (self.btn_dtr, self.btn_rts):
@@ -1050,6 +1174,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _teardown_worker(self):
         self._set_connect_params_locked(False)
+        self._line_timer.stop()
+        self.lbl_lines.setText('')
+        self._conn_mono = None
         if not self.worker:
             return
         self.worker.stop()
@@ -1065,6 +1192,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_status.style().polish(self.lbl_status)
 
     def closeEvent(self, event):  # noqa: N802 (Qt 命名)
+        if self in _LIVE_WINDOWS:
+            _LIVE_WINDOWS.remove(self)
+        if self._txseq_dialog is not None:
+            self._txseq_dialog.close()
         self._save_connect_settings()
         if getattr(self, '_port_watch_timer', None):
             self._port_watch_timer.stop()
@@ -1085,6 +1216,9 @@ class MainWindow(QtWidgets.QMainWindow):
         now = time.monotonic()
         self.rx_bytes_total += len(data)
         self._update_stats_label()
+        if self._xfer is not None:
+            for b in data:
+                self._xfer['engine'].on_rx(b)   # 协议引擎先吃应答字节
         if self.recorder.active and self._replay_state is None:
             # 回放期间不再录自己（避免回放套娃）
             self.recorder.record_chunk(data)
@@ -1298,6 +1432,18 @@ class MainWindow(QtWidgets.QMainWindow):
             color, marker, bold = self._esp32_log_style(text)
             if marker is not None:
                 self._append_log('SYS', marker)   # 复位横幅装饰行（递归，落在 RX 行前）
+        # 关键词高亮/告警（用户意图 > IDF 等级色 > 设备 SGR 色）：alert 红 / watch 琥珀
+        kw_color = None
+        if direction == 'RX':
+            self._refresh_keywords()
+            kw = rx_highlight.match_line(text, self._kw_alert, self._kw_watch)
+            if kw == 'alert':
+                kw_color = theme.color('status_err')
+            elif kw == 'watch':
+                kw_color = theme.color('status_warn')
+            if kw_color:
+                color = kw_color
+                bold = True
         if direction == 'RX' and self.chk_ansi.isChecked():
             # ANSI 渲染：显示段以字符格式直插文档——文本零损耗（查找/悬停互转
             # 按原文工作），空格天然保排版（框线图/艺术字不塌陷），非 SGR 转义
@@ -1307,10 +1453,14 @@ class MainWindow(QtWidgets.QMainWindow):
             if had_sgr:
                 bold = False   # 设备 SGR 自带粗体表达，IDF 层整行加粗不再叠加
             self.log.appendHtml(
-                f'<span style="color:{theme.TIME_COLOR}">[{_stamp()}]</span> '
+                f'<span style="color:{theme.TIME_COLOR}">[{self._log_stamp()}]</span> '
                 f'<b style="color:{color}">{direction}</b>'
             )
             cursor = self.log.textCursor()
+            # 光标必须收拢到文档末尾再插入：用户在日志里留有选中区时，控件光标
+            # 带着选区——直接 insertText 会把新数据替换进选区（毁日志、吞选中）
+            cursor.movePosition(QtGui.QTextCursor.MoveOperation.End)
+            cursor.clearSelection()
             if any(seg.text for seg in segs):
                 cursor.insertText(' ')   # 方向与正文间的分隔空格走光标插入
             for seg in segs:
@@ -1333,17 +1483,28 @@ class MainWindow(QtWidgets.QMainWindow):
                     fmt.setForeground(QtGui.QColor(color))
                     if bold:
                         fmt.setFontWeight(QtGui.QFont.Weight.Bold)
+                if kw_color:
+                    fmt.setForeground(QtGui.QColor(kw_color))
+                    fmt.setFontWeight(QtGui.QFont.Weight.Bold)
                 cursor.insertText(seg.text, fmt)
         else:
             safe = html.escape(text)
             weight = 'font-weight:bold; ' if bold else ''
             self.log.appendHtml(
-                f'<span style="color:{theme.TIME_COLOR}">[{_stamp()}]</span> '
+                f'<span style="color:{theme.TIME_COLOR}">[{self._log_stamp()}]</span> '
                 f'<b style="color:{color}">{direction}</b> '
                 f'<span style="color:{color}; {weight}">{safe}</span>'
             )
         if direction == 'TX':
             self._indent_tx_line_right()
+
+    def _refresh_keywords(self):
+        """关键词表缓存：原始串脏检查（QSettings 内存读便宜，解析只在变更时）。"""
+        raw = (read_setting('log/kw_alert', ''), read_setting('log/kw_watch', ''))
+        if raw != self._kw_raw:
+            self._kw_raw = raw
+            self._kw_alert = rx_highlight.parse_keywords(raw[0])
+            self._kw_watch = rx_highlight.parse_keywords(raw[1])
 
     def _esp32_log_style(self, text: str):
         """ESP-IDF 行 → (显示色, 复位装饰行|None, 加粗)。
@@ -1408,8 +1569,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _indent_tx_line_right(self):
         """给刚落显的 TX 行行首插入制表符（appendHtml 会折叠 HTML 里的空白，
-        制表符必须走光标插入）。appendHtml 后光标停在本条 block 末尾。"""
+        制表符必须走光标插入）。appendHtml 后光标停在本条 block 末尾。
+        先收拢到文档末尾——同 _append_log，防止把制表符插进用户选中区。"""
         cursor = self.log.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.MoveOperation.End)
+        cursor.clearSelection()
         cursor.movePosition(QtGui.QTextCursor.MoveOperation.StartOfBlock)
         cursor.insertText('\t')
 
@@ -1436,8 +1600,34 @@ class MainWindow(QtWidgets.QMainWindow):
             self._count_tx_bytes(len(payload_bytes))
         suffix = '' if sent else '  (未连接，仅入日志)'
         self._append_log('TX', display_text + suffix)
+        if sent and self.btn_broadcast.isChecked():
+            peers = [w for w in _LIVE_WINDOWS if w is not self and w.worker is not None]
+            for w in peers:
+                w._send_tx_bytes(payload_bytes, display_text + '（广播）')
+            if peers:
+                self._append_log('SYS', f'已广播到 {len(peers)} 个其他会话窗口')
         self.edit_send.push_history(raw)
         self.edit_send.clear()
+
+    def _send_tx_bytes(self, payload: bytes, display_text: str) -> bool:
+        """发送原始字节并落 TX 日志/统计（序列发送/协议发送共用入口）。
+
+        未连接时仍落日志（带未连接后缀）但返回 False——调用方据此中止序列。
+        """
+        sent = bool(self.worker and self.worker.write_bytes(payload))
+        if sent:
+            self._count_tx_bytes(len(payload))
+        suffix = '' if sent else '  (未连接，仅入日志)'
+        self._append_log('TX', display_text + suffix)
+        return sent
+
+    def _open_txseq(self):
+        """打开/前置序列发送对话框（非模态，脚本与选项记忆在设置键里）。"""
+        if self._txseq_dialog is None:
+            self._txseq_dialog = TxSequenceDialog(self)
+        self._txseq_dialog.show()
+        self._txseq_dialog.raise_()
+        self._txseq_dialog.activateWindow()
 
     def _build_tx_payload(self, raw: str, newline_mode: str):
         """按发送格式组包。返回 (bytes, 展示文本)；无效 HEX 返回 (b'', 错误文本)。"""
@@ -1461,7 +1651,7 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---------- 文件发送（分块定时器，UI 不卡死；发送中再点 = 停止） ----------
 
     def toggle_file_send(self):
-        if self._file_send:
+        if self._file_send or self._xfer:
             self._stop_file_send('手动停止')
             return
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, '选择要发送的文件')
@@ -1480,6 +1670,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.set_status('串口未连接。', 'status_err')
             return
         name = path.replace('\\', '/').rsplit('/', 1)[-1]
+        proto = self.combo_file_proto.currentText()
+        if proto != '原样':
+            self._start_proto_send(name, data, proto)
+            return
         self._file_send = {'name': name, 'bytes': data, 'pos': 0}
         self.btn_file.setText('停止')
         self._append_log('TX', f'[文件发送] {name}（{len(data)} 字节，原样字节流）')
@@ -1515,6 +1709,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 'status_ok')
 
     def _stop_file_send(self, reason: str):
+        if self._xfer is not None:
+            self._stop_xfer(reason)   # 断线/窗口关闭等路径一并终止协议发送
         state = self._file_send
         if not state:
             return
@@ -1526,3 +1722,55 @@ class MainWindow(QtWidgets.QMainWindow):
                 'SYS',
                 f"[文件发送中断] {state['name']}: {reason}"
                 f"（已发 {state['pos']} / {len(state['bytes'])} 字节）")
+
+    # ---------- XMODEM/YMODEM 协议发送 ----------
+
+    def _xfer_write(self, payload: bytes):
+        """引擎待发字节 → 串口（线程同 UI；协议帧很小，无需分片）。"""
+        if self.worker and self.worker.write_bytes(payload):
+            self._count_tx_bytes(len(payload))
+
+    def _start_proto_send(self, name: str, data: bytes, proto: str):
+        if not self.worker:
+            self.set_status('串口未连接。', 'status_err')
+            return
+        engine = (XmodemSender(data, self._xfer_write)
+                  if proto == 'XMODEM'
+                  else YmodemSender(data, name, self._xfer_write))
+        self._xfer = {'engine': engine, 'name': name, 'proto': proto}
+        self.btn_file.setText('停止')
+        self._append_log('TX',
+                         f'[{proto}发送] {name}（{len(data)} 字节）——'
+                         '等待对端请求（C/NAK）…')
+        self._xfer_timer.start()
+
+    def _xfer_tick(self):
+        state = self._xfer
+        if not state:
+            self._xfer_timer.stop()
+            return
+        engine = state['engine']
+        engine.tick()
+        if engine.done:
+            self._stop_xfer('完成')
+            self.set_status(f"协议发送完成: {state['name']}", 'status_ok')
+            self._append_log('SYS',
+                             f"[{state['proto']}发送] {state['name']} 完成"
+                             f"（对端 ACK，协议层校验通过）")
+        elif engine.error:
+            self._stop_xfer(engine.error)
+            self.set_status(f"协议发送失败: {engine.error}", 'status_err')
+
+    def _stop_xfer(self, reason: str):
+        state = self._xfer
+        if not state:
+            return
+        self._xfer = None
+        self._xfer_timer.stop()
+        engine = state['engine']
+        if not engine.done and not engine.error:
+            engine.error = reason   # 阻止引擎继续写
+            self._xfer_write(bytes.fromhex('1818'))   # CAN CAN 取消对端
+        self.btn_file.setText('文件发送')
+        if reason != '完成':
+            self._append_log('SYS', f"[{state['proto']}发送中断] {state['name']}: {reason}")

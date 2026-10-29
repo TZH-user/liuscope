@@ -44,6 +44,11 @@
 - **无换行也不丢**：板卡发送不带换行符时，残行静默约 0.5 秒自动落显（不用等 8KB 强制线）
 - **聊天式发送右对齐**：TX 行靠右显示、RX/SYS 靠左，收发对话一眼分明（窗口缩放自动重排）
 - **悬停互转**：鼠标停在任意日志行 0.4 秒，HEX 行自动解码为 文本(UTF-8) / 十进制 / float32(小端)，文本行给出 UTF-8 HEX（悬停条目头行等效于悬停其正文）
+- **关键词高亮告警**：设置页配「错误/关注」关键词表（逗号分隔），RX 行命中整行红/琥珀加粗（用户意图优先于设备色）；**字号缩放** Ctrl+滚轮或 Ctrl+=/-/0（记忆于 `log/font_pt`）；**BREAK 按钮** + CTS/DSR/RI/CD 信号线实时显示；窗口置顶、选中即复制、时间戳可选连接相对秒数
+- **多会话窗口 + 广播发送**：「新窗口」(Ctrl+N) 每窗独立连一个串口（各有自己的日志/波形/频谱页与 AI 通道首窗独占）；勾选「广播」后发送同步转发到其他**已连接**窗口（各自落 TX 日志计数，一跳不回环）
+- **序列发送**（MobaXterm macro 对应物）：`send/sendhex/delay` 脚本 + 重复/循环 + 连接后自动执行（`txseq/*` 设置键记忆）
+- **XMODEM / YMODEM 发送**：文件发送新增协议选择——YMODEM 批传输（文件名+大小+1024 字节块 CRC16）适配 STM32 ROM bootloader 与 U-Boot loady，XMODEM 128 字节块（CRC/校验和自适应）；超时/NAK 重发/对端 CAN 取消保护
+- **正则查找**：查找条勾选 `.*` 按正则匹配（大小写不敏感，弱高亮上限 500 处），时刻定位不受影响
 - **日志区等宽字体 + 自动折行**：日志主区用等宽字体（Windows 命中 Consolas，中文自动回落雅黑）按终端网格对齐——字符画/框线图/HEX 列不再被比例字体压歪；长行与长 HEX 串超出视口宽自动折到下一行，窗口缩放即时重排（效果见 `_verify/evidence/ansi_motd_art_mono.png`）
 - **ANSI 终端渲染**（日志区开关，默认开）：串口回传的 SGR 颜色转义按设备指定着色——16 色（深/浅主题各一套端末调色板）、256 色、真彩，粗体/斜体/下划线/删除线/反显/暗淡生效；清屏、光标移动、OSC 标题等对滚动日志无意义的序列自动剥除；空格保排版，Linux 串口控制台的框线图与 ASCII 艺术字不塌陷；设备指定色对日志底对比度过低时自动混合保底（效果见 `_verify/evidence/ansi_render_*.png`）。对不含转义码的行零影响；HEX 显示模式不走本渲染，二进制协议建议用 HEX 查看
 - **波形悬停读数**：波形绘图区悬停出十字线与读数框——首行 x 坐标，随后每条可见曲线一行「曲线名: y值」（同曲线配色，y 取真实采样点）
@@ -111,7 +116,7 @@ python -m PyInstaller --noconfirm --onefile --windowed --paths qt --name LiuScop
 
 RK3562 推荐先试 `1500000 / 8 / None / One / None`；板子按协议发数据即可看到曲线，波形页「格式说明」有三种协议的帧格式与单片机示例代码。
 
-**离屏自测**（无需显示器/串口，49 组断言）：
+**离屏自测**（无需显示器/串口，61 组断言）：
 
 ```powershell
 python qt/selftest.py
@@ -130,7 +135,7 @@ python qt/selftest.py
 ## 🧪 自检与测试
 
 ```powershell
-# 离屏自测（49 组：协议/终端/热插拔/查找/录制/控制通道/headless/波形/频谱/Modbus/
+# 离屏自测（61 组：协议/终端/热插拔/查找/录制/控制通道/headless/波形/频谱/Modbus/
 # 更新/主题/STM32 假 CLI/AI 通道扩展/ESP32 连接层与日志层/ANSI 渲染/八页签集成……）
 python qt/selftest.py
 ```
@@ -140,7 +145,7 @@ python qt/selftest.py
 ```
 LiuScope/
   qt/                      ★ Qt 主线（v1.2.0）：core（纯逻辑）/ ui（分层窗体）/
-                           selftest.py（离屏自测 49 组）/ headless_main.py（无头管线）
+                           selftest.py（离屏自测 61 组）/ headless_main.py（无头管线）
   docs/                    screenshots/ 截图
   AI_INTERFACE.md          AI 控制通道 + 无头模式接入指南（命令表与 help 同源）
   qt/README_QT.md          Qt 主线里程碑（M1~M5 与 v1.2.0 收口）

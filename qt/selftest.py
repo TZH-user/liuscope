@@ -1728,6 +1728,7 @@ def _fake_worker_cls():
         def __init__(self, device, baud, parent=None, dtr_rts_neutral=False, auto_reconnect=False):
             super().__init__(parent)
             self.device, self.baud = device, baud
+            self.breaks = 0
 
         def start(self):
             self.opened.emit()
@@ -1737,6 +1738,13 @@ def _fake_worker_cls():
 
         def write_bytes(self, data):
             return True
+
+        def send_break(self):
+            self.breaks += 1
+            return True
+
+        def line_signals(self):
+            return {'cts': True, 'dsr': False, 'ri': False, 'cd': True}
 
     return FakeWorker
 
@@ -3190,6 +3198,9 @@ def run_selftest(frozen: bool = False, only: str | None = None) -> int:
     from selftest_esp32_link import groups as _esp32_link_groups
     from selftest_esp32_log import groups as _esp32_log_groups
     from selftest_ansi import groups as _ansi_groups
+    from selftest_display import groups as _display_groups
+    from selftest_txseq import groups as _txseq_groups
+    from selftest_xfer import groups as _xfer_groups
     groups = [
         test_rx_buffer,
         test_hexutil,
@@ -3231,6 +3242,9 @@ def run_selftest(frozen: bool = False, only: str | None = None) -> int:
         *_esp32_link_groups(),
         *_esp32_log_groups(),
         *_ansi_groups(),
+        *_display_groups(),
+        *_txseq_groups(),
+        *_xfer_groups(),
     ]
     # 冻结冒烟（--selftest-exit）剔除两类组：
     # ① windowed onefile 里以 sys.executable 再起子进程（= exe 自身 → 卡死）或访问外网；

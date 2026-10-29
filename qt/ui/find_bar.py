@@ -30,6 +30,13 @@ class FindBar(QtWidgets.QWidget):
         self.edit_find.returnPressed.connect(lambda: self.navigate(+1))
         self.edit_find.textChanged.connect(self._refresh)
 
+        self.chk_regex = QtWidgets.QCheckBox('.*')
+        self.chk_regex.setToolTip(
+            '正则表达式查找（大小写不敏感，与普通查找一致）：\n'
+            '如 RX 0x[0-9A-F]{2} 匹配十六进制、E \\(\\d+\\) 匹配 IDF 错误行。'
+            '勾选后时刻定位停用，弱高亮上限 500 处')
+        self.chk_regex.toggled.connect(self._refresh)
+
         self.btn_prev = QtWidgets.QPushButton('上一个')
         self.btn_prev.setObjectName('tool')
         self.btn_prev.clicked.connect(lambda: self.navigate(-1))
@@ -46,6 +53,7 @@ class FindBar(QtWidgets.QWidget):
         row = QtWidgets.QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(self.edit_find, 1)
+        row.addWidget(self.chk_regex)
         row.addWidget(self.btn_prev)
         row.addWidget(self.btn_next)
         row.addWidget(self.lbl_count)
@@ -75,10 +83,14 @@ class FindBar(QtWidgets.QWidget):
         query = self.edit_find.text().strip()
         self._matches = []
         self._index = -1
-        self._time_mode = bool(query) and is_timestamp_query(query)
+        self._time_mode = bool(query) and not self.chk_regex.isChecked() \
+            and is_timestamp_query(query)
         if not query:
             self.lbl_count.setText('')
             self._apply_highlights()
+            return
+        if self.chk_regex.isChecked():
+            self._refresh_regex(query)
             return
         if self._time_mode:
             self._refresh_time_mode(query)
@@ -93,6 +105,25 @@ class FindBar(QtWidgets.QWidget):
         if self._matches:
             self._index = 0
             self.lbl_count.setText(f'第 1/{len(self._matches)} 处')
+        else:
+            self.lbl_count.setText('无匹配')
+        self._apply_highlights()
+
+    def _refresh_regex(self, pattern: str):
+        """正则模式：全文 re.finditer，弱高亮上限 500（同时间模式口径）。"""
+        import re
+        try:
+            rx = re.compile(pattern, re.IGNORECASE)
+        except re.error as exc:
+            self.lbl_count.setText(f'正则无效: {exc}')
+            self._apply_highlights()
+            return
+        text = self._edit.toPlainText()
+        self._matches = [self._make_cursor(m.start(), m.end() - m.start())
+                         for m in rx.finditer(text)][:MAX_TIME_HIGHLIGHTS]
+        if self._matches:
+            self._index = 0
+            self.lbl_count.setText(f'正则 第 1/{len(self._matches)} 处')
         else:
             self.lbl_count.setText('无匹配')
         self._apply_highlights()

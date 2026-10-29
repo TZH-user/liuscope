@@ -147,6 +147,23 @@ class SerialWorker(QtCore.QThread):
     def set_rts(self, on: bool) -> bool:
         return self._ctrl(lambda p: setattr(p, 'rts', bool(on)))
 
+    def send_break(self) -> bool:
+        """发送串口 BREAK（部分板子进 bootloader/唤醒用；虚拟口静默忽略）。"""
+        return self._ctrl(lambda p: p.send_break())
+
+    def line_signals(self) -> dict | None:
+        """读 modem 状态线（跨线程寄存器读，同 DTR/RTS 跨线程口径）。
+
+        loop:// 等虚拟口/不支持线控的驱动返回 None，调用方按未知处理。
+        """
+        if not self._port:
+            return None
+        try:
+            return {'cts': bool(self._port.getCTS()), 'dsr': bool(self._port.getDSR()),
+                    'ri': bool(self._port.getRI()), 'cd': bool(self._port.getCD())}
+        except Exception:
+            return None
+
     def write_bytes(self, data: bytes) -> bool:
         if not self._port:
             return False
