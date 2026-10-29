@@ -3,6 +3,14 @@
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/) 与
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式。
 
+## [Unreleased]
+
+### 新增
+- **ANSI 终端渲染**（日志区新开关「ANSI 渲染」，默认开，设置键 `log/ansi_render`）：串口回传的 SGR 转义按设备指定着色——16 色（按日志底色明暗自动切深/浅两套端末调色板，鲁班猫等 Linux 串口控制台、ESP-IDF 日志色码直接受益）、256 色、真彩；粗体/斜体/下划线/删除线/反显/暗淡生效；清屏、光标移动、OSC 标题、字符集切换等对滚动日志无意义的序列自动剥除。渲染以字符格式直插文档：文本零损耗（查找 / 悬停 HEX⇄文本互转按原文工作），空格天然保排版——框线图与 ASCII 艺术字不再塌陷；设备指定色对日志底对比度 <2.0 时朝文字色混合保底。条目原文与自动保存日志始终记录原始解码结果（含转义码）。新增 `qt/core/ansi_render.py`（纯逻辑段解析）与自测 3 组（全量 48 组）；视觉证据 `_verify/evidence/ansi_render_{dark,light}.png`（复现：`_verify/ansi_demo_shot.py`）
+
+### 修复
+- 对比度审计脚本页签清单未随 v1.3「Linux 支持」页更新（7→8）导致无法运行，已修正（现覆盖 436 项，两主题 0 违规）
+
 ## [1.3.0] - 2026-10-28
 
 ### 新增

@@ -21,7 +21,7 @@ from core import APP_NAME, APP_VERSION, REPO_URL
 from core.ai_doc import get_control_channel_doc
 from core.auto_log import AutoLogWriter, build_log_export_text, format_entry_block, get_log_dir
 from core.control_channel import ControlAPI, ControlChannel, handle_control_request
-from core import esp_idf_log
+from core import ansi_render, esp_idf_log
 from core.fault_decode import test_fault_dump_line
 from core.hexutil import bytes_to_hex_text, try_parse_hex_text
 from core.port_hints import port_open_error_hint
@@ -236,6 +236,16 @@ class MainWindow(QtWidgets.QMainWindow):
             '并收集 backtrace 地址供「解析 backtrace」翻译成源码位置')
         self.chk_idf.toggled.connect(lambda on: write_setting('log/esp_idf_parse', '1' if on else '0'))
         self._esp32_bt: list[str] = []   # backtrace 地址收集器（复位横幅/清空记录时重置）
+
+        # ---- ANSI 终端渲染（SGR 着色 + 框线/艺术字排版保留） ----
+        self.chk_ansi = QtWidgets.QCheckBox('ANSI 渲染')
+        self.chk_ansi.setChecked(read_setting('log/ansi_render', '1') != '0')
+        self.chk_ansi.setToolTip(
+            '渲染串口回传里的 ANSI 转义序列：SGR 颜色（16/256 色/真彩）按设备指定着色，\n'
+            '粗体/斜体/下划线/反显生效；空格保排版，框线图与 ASCII 艺术字不塌陷。\n'
+            '光标移动/清屏等对滚动日志无意义的序列自动剥除；对比度过低的颜色自动混合保底。\n'
+            '原文条目与自动保存日志不受影响，始终记录原始字节解码结果')
+        self.chk_ansi.toggled.connect(lambda on: write_setting('log/ansi_render', '1' if on else '0'))
         self.btn_backtrace = QtWidgets.QPushButton('解析 backtrace')
         self.btn_backtrace.setObjectName('tool')
         self.btn_backtrace.setEnabled(False)
@@ -245,6 +255,7 @@ class MainWindow(QtWidgets.QMainWindow):
         logbar = QtWidgets.QHBoxLayout()
         logbar.addWidget(self.chk_auto_save)
         logbar.addWidget(self.chk_idf)
+        logbar.addWidget(self.chk_ansi)
         logbar.addWidget(self.lbl_log_path, 1)
         # ESP32 线控放日志行右段（顶行宽度有限；连接后可用，tooltip 带语义）
         logbar.addWidget(self.btn_mc_reset)
@@ -1282,13 +1293,50 @@ class MainWindow(QtWidgets.QMainWindow):
             color, marker, bold = self._esp32_log_style(text)
             if marker is not None:
                 self._append_log('SYS', marker)   # 复位横幅装饰行（递归，落在 RX 行前）
-        safe = html.escape(text)
-        weight = 'font-weight:bold; ' if bold else ''
-        self.log.appendHtml(
-            f'<span style="color:{theme.TIME_COLOR}">[{_stamp()}]</span> '
-            f'<b style="color:{color}">{direction}</b> '
-            f'<span style="color:{color}; {weight}">{safe}</span>'
-        )
+        if direction == 'RX' and self.chk_ansi.isChecked():
+            # ANSI 渲染：显示段以字符格式直插文档——文本零损耗（查找/悬停互转
+            # 按原文工作），空格天然保排版（框线图/艺术字不塌陷），非 SGR 转义
+            # （清屏/光标移动）同样剥除。无 SGR 行回落 IDF/默认整行样式。
+            segs, had_sgr = ansi_render.parse_segments(
+                text, color, theme.color('log_bg'), theme.color('log_text'))
+            if had_sgr:
+                bold = False   # 设备 SGR 自带粗体表达，IDF 层整行加粗不再叠加
+            self.log.appendHtml(
+                f'<span style="color:{theme.TIME_COLOR}">[{_stamp()}]</span> '
+                f'<b style="color:{color}">{direction}</b>'
+            )
+            cursor = self.log.textCursor()
+            if any(seg.text for seg in segs):
+                cursor.insertText(' ')   # 方向与正文间的分隔空格走光标插入
+            for seg in segs:
+                if not seg.text:
+                    continue
+                fmt = QtGui.QTextCharFormat()
+                if had_sgr:
+                    fmt.setForeground(QtGui.QColor(seg.color))
+                    if seg.bg:
+                        fmt.setBackground(QtGui.QColor(seg.bg))
+                    if seg.bold:
+                        fmt.setFontWeight(QtGui.QFont.Weight.Bold)
+                    if seg.italic:
+                        fmt.setFontItalic(True)
+                    if seg.underline:
+                        fmt.setFontUnderline(True)
+                    if seg.strike:
+                        fmt.setFontStrikeOut(True)
+                else:
+                    fmt.setForeground(QtGui.QColor(color))
+                    if bold:
+                        fmt.setFontWeight(QtGui.QFont.Weight.Bold)
+                cursor.insertText(seg.text, fmt)
+        else:
+            safe = html.escape(text)
+            weight = 'font-weight:bold; ' if bold else ''
+            self.log.appendHtml(
+                f'<span style="color:{theme.TIME_COLOR}">[{_stamp()}]</span> '
+                f'<b style="color:{color}">{direction}</b> '
+                f'<span style="color:{color}; {weight}">{safe}</span>'
+            )
         if direction == 'TX':
             self._indent_tx_line_right()
 

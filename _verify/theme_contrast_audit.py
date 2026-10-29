@@ -328,7 +328,8 @@ def main() -> int:
         app.processEvents()
 
         texts = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-        assert texts == ['终端', '波形', '频谱', 'Modbus', 'STM32', '设置', '关于'], str(texts)
+        assert texts == ['终端', '波形', '频谱', 'Modbus', 'STM32', 'Linux 支持',
+                         '设置', '关于'], str(texts)
         for i, tab_name in enumerate(texts):
             win.tabs.setCurrentIndex(i)
             app.processEvents()
