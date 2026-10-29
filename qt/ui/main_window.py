@@ -244,6 +244,7 @@ class MainWindow(QtWidgets.QMainWindow):
             '渲染串口回传里的 ANSI 转义序列：SGR 颜色（16/256 色/真彩）按设备指定着色，\n'
             '粗体/斜体/下划线/反显生效；空格保排版，框线图与 ASCII 艺术字不塌陷。\n'
             '光标移动/清屏等对滚动日志无意义的序列自动剥除；对比度过低的颜色自动混合保底。\n'
+            '对不含转义码的行零影响；HEX 显示模式不走本渲染，二进制协议建议用 HEX 查看。\n'
             '原文条目与自动保存日志不受影响，始终记录原始字节解码结果')
         self.chk_ansi.toggled.connect(lambda on: write_setting('log/ansi_render', '1' if on else '0'))
         self.btn_backtrace = QtWidgets.QPushButton('解析 backtrace')
