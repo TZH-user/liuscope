@@ -88,6 +88,11 @@
 - **操作**：连接目标（芯片型号/Flash/内核/电压信息区）、软复位 / 硬复位、hex 烧录（带 `-v` 校验）与 bin 烧录（基址可改）、全片擦除、读保护解除（危险操作二次确认）、OB（Option Bytes）读取；底部 CLI 原始输出日志
 - 无 CLI / 无 ST-LINK / 路径失效均给中文提示并禁用按钮，不崩；关窗自动终止在跑的子进程
 
+### Linux 支持页（RK3562 桌面回传，v2 M2 收口）
+- **一键触发发流**：填板 IP + 配对码，点「开始接收」即经控制通道 TCP 9201 自动 hello→pair→video_start，停止自动 video_stop（板端 server_rk 未运行时只提示，不影响纯收流等待）
+- 板端管线自适应：kmsgrab→x11grab 采集（1 帧真采集探测）、h264_rkmpp→h264_v4l2m2m→libx264 编码（真编码验证；软编钳 12fps 防积压），泵线程按 [seq][ts][flags] 包头打包 UDP；PyAV 软解 + GL 直通渲染（无 GL 自动 QPainter 兜底），丢包/重复/迟到统计
+- 板端启动：`cd /home/cat && sudo -n env PYTHONPATH=/home/cat nohup python3 -m server_rk --verbose &`（详见 server-rk/README）
+
 ### 设置与关于
 - **设置页**：主题深色 / 浅色 / **自定义**三档——自定义可改窗口背景/控件底/正文文字/强调色/日志底/日志文字六键（基准主题决定曲线色等其余键），改色即时 WCAG 对比度复核并警示不达标项，重启保持；「曲线填充」开关；**页面显示**（STM32 / Linux 支持页可关，记忆保持）；STM32CubeProgrammer CLI 路径选择与记忆（留空 = 自动探测）
 - **关于页**：品牌 LiuScope（柳镜）、版本、作者 折柳、许可证 GPL-3.0、仓库地址
@@ -116,7 +121,7 @@ python -m PyInstaller --noconfirm --onefile --windowed --paths qt --name LiuScop
 
 RK3562 推荐先试 `1500000 / 8 / None / One / None`；板子按协议发数据即可看到曲线，波形页「格式说明」有三种协议的帧格式与单片机示例代码。
 
-**离屏自测**（无需显示器/串口，61 组断言）：
+**离屏自测**（无需显示器/串口，63 组断言）：
 
 ```powershell
 python qt/selftest.py
@@ -135,7 +140,7 @@ python qt/selftest.py
 ## 🧪 自检与测试
 
 ```powershell
-# 离屏自测（61 组：协议/终端/热插拔/查找/录制/控制通道/headless/波形/频谱/Modbus/
+# 离屏自测（63 组：协议/终端/热插拔/查找/录制/控制通道/headless/波形/频谱/Modbus/
 # 更新/主题/STM32 假 CLI/AI 通道扩展/ESP32 连接层与日志层/ANSI 渲染/八页签集成……）
 python qt/selftest.py
 ```
@@ -145,7 +150,7 @@ python qt/selftest.py
 ```
 LiuScope/
   qt/                      ★ Qt 主线（v1.2.0）：core（纯逻辑）/ ui（分层窗体）/
-                           selftest.py（离屏自测 61 组）/ headless_main.py（无头管线）
+                           selftest.py（离屏自测 63 组）/ headless_main.py（无头管线）
   docs/                    screenshots/ 截图
   AI_INTERFACE.md          AI 控制通道 + 无头模式接入指南（命令表与 help 同源）
   qt/README_QT.md          Qt 主线里程碑（M1~M5 与 v1.2.0 收口）

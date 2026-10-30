@@ -113,6 +113,42 @@ class _UpdateCheckRunnable(QtCore.QRunnable):
         self.signals.done.emit(result)
 
 
+class ElidedLabel(QtWidgets.QLabel):
+    """单行自动省略标签：宽度不足显示「…」，tooltip 常驻全文，不参与撑宽所在行。
+
+    状态行（打开失败等长报错文本）用它替代裸 QLabel——此前超长报错把整行乃至
+    整个窗口顶宽。sizePolicy 横向 Ignored → 布局不再被 sizeHint 顶开，
+    实际绘制文本随 resizeEvent 重算（QFontMetrics.elidedText）。
+    """
+
+    def __init__(self, text: str = '', parent=None):
+        super().__init__(parent)
+        self._full = text or ''
+        sp = self.sizePolicy()
+        sp.setHorizontalPolicy(QtWidgets.QSizePolicy.Policy.Ignored)
+        self.setSizePolicy(sp)
+        self.setMinimumWidth(1)
+        if self._full:
+            self._refresh()
+
+    def setText(self, text: str):   # noqa: N802（Qt 命名）
+        self._full = text or ''
+        self._refresh()
+
+    def text(self) -> str:          # noqa: N802（返回全文，测试/逻辑口径不受省略影响）
+        return self._full
+
+    def _refresh(self):
+        fm = self.fontMetrics()
+        super().setText(fm.elidedText(
+            self._full, QtCore.Qt.TextElideMode.ElideRight, max(24, self.width() - 2)))
+        self.setToolTip(self._full)
+
+    def resizeEvent(self, ev):      # noqa: N802（宽度变化 → 重算省略）
+        super().resizeEvent(ev)
+        self._refresh()
+
+
 class MainWindow(QtWidgets.QMainWindow):
     FLUSH_INTERVAL_MS = 200
 
@@ -199,7 +235,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_auto_link.setToolTip('勾选后扫描到新插入的串口设备即自动连接（多个新设备优先 CH340/CH341）')
         self.chk_auto_link.toggled.connect(
             lambda on: write_setting('connect/auto_link', '1' if on else '0'))
-        self.lbl_status = QtWidgets.QLabel('未连接')
+        self.lbl_status = ElidedLabel('未连接')   # 长报错省略+悬停全文，不撑宽窗口
         self.lbl_status.setObjectName('status_err')
         self.lbl_stats = QtWidgets.QLabel('RX 0.0 KiB | TX 0.0 KiB')
         self.lbl_stats.setObjectName('backlog')

@@ -16,11 +16,21 @@ _HINT_LINUX_BUSY = (
     '（sudo systemctl disable --now ModemManager 后重插）')
 _HINT_WIN_BUSY = (
     '串口被其他程序占用（含另一个 LiuScope 实例/串口监视器），关闭后重试')
+_HINT_WIN_DEVFAIL = (
+    'Windows 错误码 31（设备未响应配置）：多为串口被占用或 USB 串口适配器假死；'
+    '关闭其他占用程序后重试，仍失败则重插 USB（设备管理器确认 COM 号未漂移）')
 
 
 def port_open_error_hint(exc_text: str, sys_platform: str) -> str | None:
-    """打开失败的异常文本 + 平台 → 一句处置提示；无匹配返回 None。"""
+    """打开失败的异常文本 + 平台 → 一句处置提示；无匹配返回 None。
+
+    顺序敏感：winerror 31 的文本同时含 PermissionError 与「没有发挥作用」，
+    设备故障匹配必须先于笼统的 permission/占用 匹配。
+    """
     text = (exc_text or '').lower()
+    if ('没有发挥作用' in exc_text or 'not functioning' in text
+            or 'gen_failure' in text or ', none, 31' in text):
+        return _HINT_LINUX_PERM if 'linux' in (sys_platform or '').lower() else _HINT_WIN_DEVFAIL
     if 'permission' in text or 'access is denied' in text or 'errno 13' in text:
         return _HINT_LINUX_PERM if 'linux' in (sys_platform or '').lower() else _HINT_WIN_BUSY
     if 'resource busy' in text or 'busy' in text or 'errno 16' in text:

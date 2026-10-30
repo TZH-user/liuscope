@@ -107,17 +107,23 @@ def test_log_font_zoom():
         win.log.ensurePolished()
         mono_fam = theme.mono_font().family()
 
+        # offscreen 平台插件（Windows）无系统字体库：QFontInfo 无对象可解析，
+        # 字号类断言仅在真实字体库下执行（族名/文档字体断言不受平台影响）。
+        real_fontdb = bool(QtGui.QFontDatabase.families())
+
         # 复位态:跟随主题(无控件级 size),族名仍等宽
         win.log.zoom(0)
         assert win.log.font_pt() == 0
         assert win.log.font().family() == mono_fam
-        assert QtGui.QFontInfo(win.log.font()).pointSize() >= 9
+        if real_fontdb:
+            assert QtGui.QFontInfo(win.log.font()).pointSize() >= 9
 
         win.log.zoom(1)
         pt1 = win.log.font_pt()
         assert pt1 == 10, pt1
         win.log.ensurePolished()
-        assert QtGui.QFontInfo(win.log.font()).pointSize() == pt1, 'QSS size 应落到实际字体'
+        if real_fontdb:
+            assert QtGui.QFontInfo(win.log.font()).pointSize() == pt1, 'QSS size 应落到实际字体'
         assert win.log.font().family() == mono_fam, '放大不得丢等宽族名'
         assert win.log.document().defaultFont().family() == mono_fam
         assert win.log.document().defaultFont().pointSize() == pt1,             '正文按文档默认字体排版——字号必须落到文档'
@@ -298,6 +304,66 @@ def test_find_regex():
     print('FIND REGEX OK')
 
 
+def test_status_elide():
+    """状态行省略标签:超长报错不撑宽(sizePolicy Ignored)、绘制文本带「…」、tooltip 全文。"""
+    from PySide6 import QtCore, QtGui, QtWidgets
+
+    import ui.main_window as mw
+    from selftest import _CONNECT_KEYS, _fake_worker_cls, _restore_settings, _snapshot_settings
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    saved = _snapshot_settings(_CONNECT_KEYS)
+    mw.SerialWorker = _fake_worker_cls()
+    win = None
+    try:
+        win = mw.MainWindow()
+        win._port_watch_timer.stop()
+        long_err = '打开失败: Cannot configure port, something went wrong. ' * 4
+        win.set_status(long_err, 'status_err')
+
+        lbl = win.lbl_status
+        assert lbl.text() == long_err, 'text() 应返回全文（逻辑/测试口径不受省略影响）'
+        assert lbl.toolTip() == long_err, '悬停 tooltip 必须是完整报错'
+        assert lbl.sizePolicy().horizontalPolicy() == \
+            QtWidgets.QSizePolicy.Policy.Ignored, '横向 Ignored 才不会把窗口撑宽'
+
+        # 窄容器下重算省略:实际显示文本被截断且带省略号。
+        # 驱动方式：setGeometry 同步改 width()，但 offscreen 对隐藏控件推迟事件
+        # 派发——逻辑层直接调 _refresh()，接线层用 sendEvent 送真 QResizeEvent。
+        holder = QtWidgets.QWidget()
+        holder.resize(400, 24)
+        probe = mw.ElidedLabel(long_err, parent=holder)
+        probe.setGeometry(0, 0, 240, 24)
+        probe._refresh()
+        shown = QtWidgets.QLabel.text(probe)
+        assert len(shown) < len(long_err) and shown.endswith('…'), shown[-30:]
+        # 复宽后再展开:恢复完整绘制（宽度按字体度量自适应，写死像素会假阳性）
+        need = probe.fontMetrics().horizontalAdvance(long_err) + 100
+        probe.setGeometry(0, 0, need, 24)
+        probe._refresh()
+        assert QtWidgets.QLabel.text(probe) == long_err, '足够宽时应完整显示不省略'
+        assert probe.toolTip() == long_err
+        # 接线:resizeEvent 必须触发重算（真实桌面上宽度变化都经这条路）。
+        # sendEvent 只送通知不改几何——先真正缩窄再送事件，重算读到的才是新宽度。
+        probe.setGeometry(0, 0, 120, 24)
+        evt = QtGui.QResizeEvent(QtCore.QSize(120, 24), QtCore.QSize(need, 24))
+        QtWidgets.QApplication.sendEvent(probe, evt)
+        shown3 = QtWidgets.QLabel.text(probe)
+        assert len(shown3) < len(long_err) and shown3.endswith('…'), 'resize 事件后应重算省略'
+        holder.deleteLater()
+
+        # 打开失败路径:同样落省略标签（文本带「打开失败: 」前缀，tooltip=全文）
+        win._on_open_failed(long_err)
+        assert lbl.text() == '打开失败: ' + long_err, lbl.text()[:60]
+        assert lbl.toolTip() == lbl.text(), '悬停 tooltip 必须是完整报错'
+    finally:
+        if win is not None:
+            win._port_watch_timer.stop()
+            win.close()
+        _restore_settings(saved)
+    print('STATUS ELIDE OK')
+
+
 def test_multi_window_broadcast():
     """多会话窗口:注册编号 + 广播一跳转发不回环 + 未连接窗口跳过。"""
     from PySide6 import QtWidgets
@@ -367,4 +433,4 @@ def test_multi_window_broadcast():
 def groups():
     return [test_rx_keyword_highlight, test_log_font_zoom,
             test_break_and_line_signals, test_qol_settings, test_find_regex,
-            test_multi_window_broadcast]
+            test_status_elide, test_multi_window_broadcast]

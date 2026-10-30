@@ -51,6 +51,11 @@ def test_port_open_hints():
     assert 'ModemManager' in port_open_error_hint(
         'SerialException: Device or resource busy', 'linux')
     assert '占用' in port_open_error_hint('could not open port: Access is denied (5)', 'win32')
+    # winerror 31（设备未响应配置）文本同时含 PermissionError → 设备故障提示优先于笼统占用
+    hint31 = port_open_error_hint(
+        "Cannot configure port, something went wrong. Original message: "
+        "PermissionError(13, '连到系统上的设备没有发挥作用。', None, 31)", 'win32')
+    assert '错误码 31' in hint31 and '重插' in hint31
     assert port_open_error_hint('PortDeviceNotImplemented: unknown', 'win32') is None
     assert port_open_error_hint('', '') is None
     print('PORT OPEN HINTS OK')

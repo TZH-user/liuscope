@@ -220,11 +220,14 @@ def test_log_wrap_mono_art():
         # 等宽字体经 QSS(#log_view) 生效:控件字体与文档默认字体都要命中。
         # 注意 QSS 解析出的 QFont 只带 family 不带 fixedPitch 标志，等宽与否
         # 要问 QFontInfo（真实字体引擎）而不是 QFont.fixedPitch()。
+        # offscreen 平台插件（Windows）不带系统字体库：families() 为空、QFontInfo
+        # 无对象可解析——此时只验 QSS 注入与 family 一致，QFontInfo 断言留给真实平台。
         mono_fam = theme.mono_font().family()
         win.log.ensurePolished()
         assert win.log.font().family() == mono_fam, win.log.font().family()
-        assert QtGui.QFontInfo(win.log.font()).fixedPitch(), \
-            f'QSS 解析出的 {win.log.font().family()} 应为真实等宽字体'
+        if set(QtGui.QFontDatabase.families()):
+            assert QtGui.QFontInfo(win.log.font()).fixedPitch(), \
+                f'QSS 解析出的 {win.log.font().family()} 应为真实等宽字体'
         assert win.log.document().defaultFont().family() == mono_fam, \
             win.log.document().defaultFont().family()
 

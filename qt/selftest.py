@@ -3114,6 +3114,120 @@ def test_device_screen():
     print('DEVICE SCREEN OK')
 
 
+def test_device_screen_control():
+    """M2 收口①：控制通道客户端——loopback 假 server_rk 验 hello→pair→video_start
+    对话、listen_port 透传、video_stop 收尾；连接拒绝时只报错不炸。"""
+    import json as _json
+    import socket as _socket
+    import threading
+
+    from PySide6 import QtWidgets
+
+    from ui.device_screen import ControlClient
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+
+    recv_lines: list[dict] = []
+    srv = _socket.socket()
+    srv.bind(('127.0.0.1', 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+
+    def serve():
+        srv.settimeout(6)
+        try:
+            conn, _ = srv.accept()
+        except OSError:
+            return
+        conn.settimeout(6)
+        buf = bytearray()
+
+        def read_line():
+            while b'\n' not in buf:
+                try:
+                    chunk = conn.recv(4096)
+                except OSError:
+                    return None
+                if not chunk:
+                    return None
+                buf.extend(chunk)
+            line, _, rest = bytes(buf).partition(b'\n')
+            del buf[:]
+            buf.extend(rest)
+            req = _json.loads(line.decode('utf-8'))
+            recv_lines.append(req)
+            return req
+
+        while True:
+            req = read_line()
+            if req is None:
+                break
+            cmd = req.get('cmd')
+            if cmd == 'hello':
+                resp = {'ok': True, 'challenge': 'CH7', 'nonce': req.get('nonce'),
+                        'server_version': 'test'}
+            elif cmd == 'pair':
+                resp = {'ok': True, 'session': 'sess-1'}
+            elif cmd == 'video_start':
+                resp = {'ok': True, 'target': f'127.0.0.1:{req.get("listen_port")}',
+                        'note': 'ffmpeg pid=4321'}
+            elif cmd == 'video_stop':
+                conn.sendall(b'{"ok": true, "stopped": true}\n')
+                break
+            else:
+                resp = {'ok': False, 'error': f'未知命令 {cmd}'}
+            conn.sendall((_json.dumps(resp, ensure_ascii=False) + '\n').encode('utf-8'))
+        conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+
+    def reports_until(level: str, timeout: float = 5.0) -> list[tuple[str, str]]:
+        reports: list[tuple[str, str]] = []
+        client.report.connect(lambda text, lv: reports.append((text, lv)))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            app.processEvents()
+            if any(lv == level for _, lv in reports):
+                return reports
+            time.sleep(0.02)
+        return reports
+
+    client = ControlClient('127.0.0.1', port, '246810', 9300,
+                           connect_fn=lambda hp, t: _socket.create_connection(hp, timeout=t))
+    client.start()
+    reports = reports_until('status_ok')
+    assert any('已发流' in txt and lv == 'status_ok' for txt, lv in reports), reports
+    cmds = [r.get('cmd') for r in recv_lines]
+    assert cmds[:3] == ['hello', 'pair', 'video_start'], cmds
+    assert recv_lines[1].get('challenge') == 'CH7', 'pair 必须回显 hello 的 challenge'
+    assert recv_lines[2].get('listen_port') == 9300, '收流端口必须透传给板端'
+
+    # 停止：同连接发 video_stop 后线程自然退出
+    client.request_stop()
+    client.wait(6000)
+    assert not client.isRunning()
+    assert recv_lines[-1].get('cmd') == 'video_stop', recv_lines[-1]
+
+    # 错误路径：连接拒绝 → err 级 report，线程不炸不挂
+    client2 = ControlClient('127.0.0.1', 1, 'x', 9202,
+                            connect_fn=lambda hp, t: (_ for _ in ()).throw(
+                                ConnectionRefusedError('refused')))
+    reports2: list[tuple[str, str]] = []
+    client2.report.connect(lambda text, lv: reports2.append((text, lv)))
+    client2.start()
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        app.processEvents()
+        if any(lv == 'status_err' for _, lv in reports2):
+            break
+        time.sleep(0.02)
+    client2.wait(3000)
+    assert any(lv == 'status_err' and '不可达' in txt for txt, lv in reports2), reports2
+    assert not client2.isRunning()
+    srv.close()
+    print('DEVICE SCREEN CONTROL OK')
+
+
 
 def test_theme_custom_and_pages():
     """v1.3.0 外观标准化：自定义主题（六键改色+对比度警示+重启保持）+ 页面显隐记忆。"""
@@ -3239,6 +3353,7 @@ def run_selftest(frozen: bool = False, only: str | None = None) -> int:
         test_main_tabs_integration,
         test_net_serial_url,
         test_device_screen,
+        test_device_screen_control,
         *_esp32_link_groups(),
         *_esp32_log_groups(),
         *_ansi_groups(),

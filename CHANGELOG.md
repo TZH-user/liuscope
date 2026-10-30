@@ -6,7 +6,11 @@
 ## [Unreleased]
 
 ### 新增
-- **多会话窗口 + 广播发送（P2，多口并行监控）**：多会话以「一窗一会话」落地（MobaXterm split-tab 的等效工程口径——MainWindow 整窗即会话，`_LIVE_WINDOWS` 注册表编号标题，Ctrl+N/「新窗口」再开一口；每口独立 worker/日志/波形/频谱与设置记忆，AI 控制通道按既有口径首窗独占端口）；「广播」勾选后发送同步转发到其他**已连接**窗口（各自落 TX 日志与字节统计、一跳不回环、未连接跳过；`tx/broadcast` 记忆）。自测扩至 61 组（+多窗口广播 1 组）。注：单窗内页签化会话（SessionView 抽取）列为后续项——现有 61 组自测面全部绑定 MainWindow 属性面，整页签重构收益/风险比不划算
+- **「Linux 支持」页控制面打通（M2 收口：桌面回传从"等流"变"一键触发"）**：页上补控制通道客户端（`ui/device_screen.py` ControlClient）——开始接收即经 TCP 9201 hello→pair→video_start（板端推断 PC 地址 + listen_port 透传，配对码页上可改），停止时同连接 video_stop 收尾；板端 server_rk 未运行时只报控制失败、UDP 收流继续。板端配套：采集管线候选链（kmsgrab→x11grab，1 帧真采集探测——RK3562 上 kmsgrab 的 hwdownload 滤镜链首帧即崩，落 x11grab；`server_rk/video.py` pick_pipeline）；编码器候选链（h264_rkmpp→h264_v4l2m2m→libx264，-encoders 清单外再逐个 1 帧真编码验证——Debian ffmpeg 列得出 v4l2m2m 但无 m2m 节点）；软编实时性钳制（x264 ultrafast 720p30 实测 0.52x，fps 钳 12 防积压延迟）；**发送路径补 §4 包头**（M2 空洞：ffmpeg 直发 udp:// 是裸 Annex-B，PC 端按 [seq][ts][flags] 剥头会把码流撕碎——现 ffmpeg 输出走 stdout，板端泵线程 packetize 后再发 UDP，与 H264UdpSource 严格对称）；ffmpeg 立死检测（rc 上报 video_start）；video_start 冷启动超时给足 20s（管线/编码探测 ~10s 量级）。端到端验证：控制配对→x11grab→libx264→UDP→PC 解码 23 帧 1024x600（证据 `_verify/evidence/linux_video_frame.png`，复现 `_verify/linux_ctrl_smoke.py`/`_verify/linux_video_frame.py`）。server-rk 自测扩至 15 组，LiuScope 自测 +2 组（控制通道对话/状态省略）
+
+- **状态行省略标签（长报错不再撑宽窗口）**：连接行状态 QLabel 改 `ElidedLabel`（横向 sizePolicy Ignored + QFontMetrics.elidedText 随宽重算）——超长报错（如串口打开失败的 pyserial 原文）超宽出「…」，悬停 tooltip 常驻完整原文；text() 仍返回全文（测试/逻辑口径不变）。打开失败处置提示补 winerror 31（PermissionError(13,…,None,31)「连到系统上的设备没有发挥作用」）专属分支：多为被占用或 USB 适配器假死，关占用程序→重插 USB（设备管理器确认 COM 号未漂移）；该文本同时含 PermissionError，设备故障匹配必须先于笼统占用匹配
+
+：多会话以「一窗一会话」落地（MobaXterm split-tab 的等效工程口径——MainWindow 整窗即会话，`_LIVE_WINDOWS` 注册表编号标题，Ctrl+N/「新窗口」再开一口；每口独立 worker/日志/波形/频谱与设置记忆，AI 控制通道按既有口径首窗独占端口）；「广播」勾选后发送同步转发到其他**已连接**窗口（各自落 TX 日志与字节统计、一跳不回环、未连接跳过；`tx/broadcast` 记忆）。自测扩至 61 组（+多窗口广播 1 组）。注：单窗内页签化会话（SessionView 抽取）列为后续项——现有 61 组自测面全部绑定 MainWindow 属性面，整页签重构收益/风险比不划算
 
 - **日志显示与操控增强（P0 批次）**：RX 关键词高亮/告警（`core/rx_highlight.py` 纯逻辑 + 设置页双表，alert 红/watch 琥珀、剥转义匹配、用户意图优先）；日志区 Ctrl+滚轮/Ctrl+=/-/0 字号缩放（`ui/log_view.py`，字号必须同时落到 document.defaultFont——控件级 QSS 只改 size 时正文仍按旧字号排版，FontChange 事件挂钩防主题切换丢缩放）；BREAK 发送 + CTS/DSR/RI/CD 信号线 500ms 轮询显示；窗口置顶、选中即复制（PuTTY 风格）、时间戳 clock/elapsed 双模式。新增 `ui/log_view.py`（LogView 控件承载等宽+缩放）与自测 5 组
 - **序列发送（P1）**：`core/tx_sequence.py`（send/sendhex/delay 解析 + QTimer 驱动 Runner：重复/循环/写失败中止）+ `ui/tx_sequence_dialog.py` 非模态对话框（脚本/重复/自动执行记忆于 txseq/*）；连接后自动执行适配自动重连场景。新增自测 2 组

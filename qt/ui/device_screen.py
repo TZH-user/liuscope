@@ -14,11 +14,20 @@ av.CodecContext('h264') 软解 → 帧回调上屏。
 
 丢包：seq 跳变累计丢包数并发 resync_needed（M2 原型仅提示；M3 经控制通道
 发 resync{from_seq} 请求板端强制 IDR）。
+
+控制面（M2 收口）：页上原本只被动收流，video_start 没人发——开始接收时
+ControlClient 走 TCP 9201 控制通道 hello→pair→video_start（目标 = 控制连接
+对端 IP + listen_port），停止时同连接发 video_stop。板端 server_rk 没在跑时
+只报控制失败，UDP 收流继续（允许手工触发发流的自测路径）。
 """
 from __future__ import annotations
 
+import json
 import re
+import secrets
+import socket
 import struct
+import threading
 import time
 from collections import deque
 
@@ -29,9 +38,14 @@ from PySide6.QtOpenGL import QOpenGLBuffer, QOpenGLShader, QOpenGLShaderProgram
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtNetwork import QHostAddress, QUdpSocket
 
+from core.settings import read_setting, write_setting
 from ui import theme
 
 DEFAULT_UDP_PORT = 9202   # 设计 §4：视频面 UDP 9202
+CONTROL_PORT_DEFAULT = 9201   # 设计 §4：控制面 TCP 9201
+# M2 明文版配对码，与 server_rk/protocol.DEFAULT_PAIRING_CODE 一致（出厂值，
+# 真板可经 pairing_code.txt/SERVER_RK_PAIRING_CODE 覆盖，页上可改）
+PAIRING_CODE_DEFAULT = '246810'
 
 _HEADER = struct.Struct('>IIB')   # [seq u32][ts_ms u32][flags u8]，网络字节序（与板端 server_rk.video.packetize 一致）
 _START_CODE = b'\x00\x00\x01'
@@ -442,6 +456,78 @@ class ScreenGLWidget(QOpenGLWidget):
         painter.end()
 
 
+class ControlError(RuntimeError):
+    """控制协议层的失败（对端回 ok=false / 断连 / 超时），message 即给用户看的一句。"""
+
+
+class ControlClient(QtCore.QThread):
+    """控制面客户端：一条连接上 hello→pair→video_start 一气呵成，会话保活。
+
+    request_stop() 置位后同连接发 video_stop 再收尾（板端先停流、后撤 UDP，
+    避免 ffmpeg 已停而页面还在等的空转窗口）。connect_fn 可注入，自测换
+    loopback 假服务端；report(文本, 级别) 逐步汇报，级别对应状态行配色。
+    """
+
+    report = QtCore.Signal(str, str)   # (状态文本, 'status_ok'|'status_warn'|'status_err')
+
+    def __init__(self, host: str, control_port: int, code: str, udp_port: int,
+                 connect_fn=None, parent=None):
+        super().__init__(parent)
+        self.host = host
+        self.control_port = int(control_port)
+        self.code = code
+        self.udp_port = int(udp_port)
+        self._connect_fn = connect_fn or (
+            lambda hp, timeout: socket.create_connection(hp, timeout=timeout))
+        self._stop_evt = threading.Event()
+
+    def request_stop(self):
+        self._stop_evt.set()
+
+    @staticmethod
+    def _ask(sock: socket.socket, req: dict, timeout: float = 5.0) -> dict:
+        """发一问收一答（JSON 行协议）；ok=false 抛 ControlError。"""
+        sock.settimeout(timeout)
+        sock.sendall((json.dumps(req, ensure_ascii=False) + '\n').encode('utf-8'))
+        buf = bytearray()
+        while b'\n' not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise ConnectionError('控制连接被对端关闭')
+            buf.extend(chunk)
+        line, _, _ = bytes(buf).partition(b'\n')
+        resp = json.loads(line.decode('utf-8'))
+        if not resp.get('ok'):
+            raise ControlError(str(resp.get('error', resp)))
+        return resp
+
+    def run(self):
+        try:
+            with self._connect_fn((self.host, self.control_port), 3.0) as sock:
+                self.report.emit(
+                    f'控制通道 {self.host}:{self.control_port} 已连接，配对中…', 'status_warn')
+                hello = self._ask(sock, {'cmd': 'hello', 'v': 1,
+                                         'nonce': secrets.token_hex(8)})
+                self._ask(sock, {'cmd': 'pair', 'code': self.code,
+                                 'challenge': hello.get('challenge', '')})
+                # video_start 冷启动含板端采集/编码探测（~10s 量级），超时给足
+                resp = self._ask(sock, {'cmd': 'video_start',
+                                        'listen_port': self.udp_port}, timeout=20.0)
+                target = resp.get('target') or f'{self.host}:{self.udp_port}'
+                note = f'（{resp["note"]}）' if resp.get('note') else ''
+                self.report.emit(f'板端已发流 → {target}{note}', 'status_ok')
+                self._stop_evt.wait()          # 会话保活：等页面侧停止/关窗
+                try:
+                    self._ask(sock, {'cmd': 'video_stop'}, timeout=3.0)
+                    self.report.emit('已请求板端停流', 'status_warn')
+                except Exception:              # 对端可能已退出：停流目的已达
+                    pass
+        except ControlError as exc:
+            self.report.emit(f'控制通道: {exc}', 'status_err')
+        except OSError as exc:
+            self.report.emit(f'控制通道不可达（板端 server_rk 没在跑？）: {exc}', 'status_err')
+
+
 class DeviceScreenPage(QtWidgets.QWidget):
     """「Linux 支持」页：工具行（开始/停止 + UDP 端口 + 状态）+ 渲染区 + 统计行。
 
@@ -456,6 +542,7 @@ class DeviceScreenPage(QtWidgets.QWidget):
         self.source: H264UdpSource | None = None
         self.decoder: VideoDecoder | None = None
         self._decode_thread: QtCore.QThread | None = None
+        self.control: ControlClient | None = None
         self._last_frame_count = 0
         self._fps = 0.0
 
@@ -463,17 +550,40 @@ class DeviceScreenPage(QtWidgets.QWidget):
         self.btn_start = QtWidgets.QPushButton('开始接收')
         self.btn_start.setObjectName('tool')
         self.btn_start.clicked.connect(self.toggle_stream)
+        self.edit_host = QtWidgets.QLineEdit(read_setting('linux/board_host', '192.168.2.100'))
+        self.edit_host.setMaximumWidth(130)
+        self.edit_host.setPlaceholderText('板 IP')
+        self.edit_host.setToolTip('板端 server_rk 所在地址；开始接收时经控制通道 TCP 触发发流')
+        self.edit_host.editingFinished.connect(
+            lambda: write_setting('linux/board_host', self.edit_host.text().strip()))
+        self.spin_control = QtWidgets.QSpinBox()
+        self.spin_control.setRange(1024, 65535)
+        self.spin_control.setValue(CONTROL_PORT_DEFAULT)
+        self.spin_control.setToolTip('控制面 TCP 端口（设计 §4，server_rk 监听）')
+        self.edit_code = QtWidgets.QLineEdit(read_setting('linux/pairing_code',
+                                                          PAIRING_CODE_DEFAULT))
+        self.edit_code.setMaximumWidth(80)
+        self.edit_code.setToolTip('控制通道配对码（M2 明文版；与板端 server_rk 配置一致）')
+        self.edit_code.editingFinished.connect(
+            lambda: write_setting('linux/pairing_code', self.edit_code.text().strip()))
         self.spin_port = QtWidgets.QSpinBox()
         self.spin_port.setRange(1024, 65535)
         self.spin_port.setValue(DEFAULT_UDP_PORT)
         self.spin_port.setToolTip('视频面 UDP 端口（设计 §4，板端发流到本端口）\n'
-                                  '包 = [seq u32][ts_ms u32][flags u8][payload NAL]')
+                                  '包 = [seq u32][ts_ms u32][flags u8][payload NAL]\n'
+                                  '开始接收时经控制通道把本端口作为 listen_port 告知板端')
         self.lbl_status = QtWidgets.QLabel('空闲')
         self.lbl_status.setObjectName('status_err')
         self.lbl_status.setToolTip('M2 原型：只读播放；M3 加键鼠交互与延迟 overlay')
 
         tool = QtWidgets.QHBoxLayout()
         tool.addWidget(self.btn_start)
+        tool.addWidget(QtWidgets.QLabel('板 IP'))
+        tool.addWidget(self.edit_host)
+        tool.addWidget(QtWidgets.QLabel('控制'))
+        tool.addWidget(self.spin_control)
+        tool.addWidget(QtWidgets.QLabel('配对码'))
+        tool.addWidget(self.edit_code)
         tool.addWidget(QtWidgets.QLabel('UDP 端口'))
         tool.addWidget(self.spin_port)
         tool.addWidget(self.lbl_status, 1)
@@ -537,9 +647,28 @@ class DeviceScreenPage(QtWidgets.QWidget):
         self.spin_port.setEnabled(False)
         self._set_status(f'绑定中 udp://0.0.0.0:{self.spin_port.value()} …', 'status_warn')
         self._stats_timer.start(self.STATS_INTERVAL_MS)
+        self._start_control()
+
+    def _start_control(self):
+        """起控制通道线程：板 IP 为空则跳过（纯收流模式），否则自动触发发流。"""
+        host = self.edit_host.text().strip()
+        if not host:
+            self._set_status('未填板 IP：仅收流等待（可在左侧填板端地址自动触发发流）',
+                             'status_warn')
+            return
+        self.control = ControlClient(host, self.spin_control.value(),
+                                     self.edit_code.text().strip(),
+                                     self.spin_port.value(), parent=self)
+        self.control.report.connect(self._set_status)
+        self.control.start()
 
     def _stop_pipeline(self):
         self._stats_timer.stop()
+        if self.control is not None:
+            # 先停流（video_stop 走控制连接）再撤 UDP，避免 ffmpeg 停了页面还在等
+            self.control.request_stop()
+            self.control.wait(6000)     # 覆盖连接 3s / 问答 5s 超时的最坏收尾
+            self.control = None
         if self.source is not None:
             self.source.stop()
             self.source = None
