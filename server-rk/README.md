@@ -27,6 +27,18 @@
 | input_inject | Qt.Key_* → Linux input 事件码纯数据映射表 + uinput 批注入（key/mouse_move/mouse_button/wheel）；无 uinput 记日志不抛异常 |
 | serial_bridge | 控制通道 serial_open/write/read → `serial_for_url` 单口占用透传，重开即换口/换波特率 |
 
+### 真板部署（RK356x，含视频链自适应）
+
+    # 依赖：ffmpeg（PATH 内）+ pyserial（root 可见：pip3 install pyserial 或复用用户 site）
+    cd /home/cat && sudo -n env PYTHONPATH=/home/cat:/home/cat/.local/lib/python3.11/site-packages         nohup python3 -m server_rk --verbose > /home/cat/server_rk.log 2>&1 < /dev/null &
+
+视频链在 video_start 时自动探测，无需配置：
+
+- **采集管线**：kmsgrab（DRM 直抓，设计目标）→ x11grab（X11 会话，授权文件自动发现）。探测 = 1 帧真采集+滤镜链全流程；RK3562（Debian 12 / rockchip 4.0 驱动）实测 kmsgrab 的 hwdownload 滤镜链首帧即崩，自动落 x11grab
+- **编码器**：h264_rkmpp → h264_v4l2m2m → libx264，`-encoders` 清单之外逐个 1 帧真编码验证（清单列得出 ≠ 能跑）；libx264 软编钳 12fps（720p30 实测 0.52x 实时，不钳会积压延迟）
+- **发送路径**：ffmpeg 输出走 stdout，板端泵线程切 NAL → packetize（§4 包头）→ UDP——ffmpeg 直发 udp:// 是裸 Annex-B 无包头，PC 端没法拆
+- 配对码：环境变量 SERVER_RK_PAIRING_CODE > 包目录 pairing_code.txt > 出厂默认 246810
+
 ### 本机测试（仓库根目录运行，Windows 即可）
 
     python server-rk/test_server_rk.py

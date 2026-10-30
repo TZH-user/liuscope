@@ -75,9 +75,14 @@ def _h_video_start(ctx: ControlContext, req: dict) -> dict:
     d = ctx.deps
     if d.video is None:
         return error_resp("视频源未配置")
-    # udp target 缺省 = 控制连接对端 IP + 视频 UDP 端口（PC 与控制通道同机即免配）
+    # udp target 缺省 = 控制连接对端 IP + 视频 UDP 端口（PC 与控制通道同机即免配）；
+    # listen_port 允许 PC 端收流口非默认（IP 恒取控制连接对端，端口以请求为准）
+    try:
+        port = int(req["listen_port"]) if req.get("listen_port") else d.video_udp_port
+    except (TypeError, ValueError):
+        return error_resp("listen_port 必须是整数")
     target = req.get("target") or (
-        f"{ctx.peer_ip}:{d.video_udp_port}" if ctx.peer_ip else None)
+        f"{ctx.peer_ip}:{port}" if ctx.peer_ip else None)
     if not target:
         return error_resp("缺少 target（无法从控制连接推断 PC 地址）")
     ok, msg = d.video.start(resolution=(req["width"], req["height"])

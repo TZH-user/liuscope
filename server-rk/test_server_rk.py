@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import os
@@ -73,6 +74,7 @@ class _FakeProc:
         self.pid = 4321
         self.terminated = False
         self.killed = False
+        self.stdout = io.BytesIO(b"")   # 泵线程读到 EOF 即退出（无流）
 
     def poll(self):
         return None  # 恒"运行中"
@@ -208,6 +210,11 @@ def test_control_dispatch():
     resp, _ = ask('{"cmd":"video_start","fps":30,"bitrate":"4M"}')
     assert resp["ok"] and resp["target"] == "192.0.2.7:9202", resp
     assert deps.video.started == (None, 30, "4M", "192.0.2.7:9202")
+    # listen_port：PC 端收流口非默认时以请求为准（IP 仍取控制连接对端）
+    resp, _ = ask('{"cmd":"video_start","listen_port":9300}')
+    assert resp["ok"] and resp["target"] == "192.0.2.7:9300", resp
+    resp, _ = ask('{"cmd":"video_start","listen_port":"abc"}')
+    assert not resp["ok"] and "listen_port" in resp["error"]
     resp, _ = ask('{"cmd":"video_stop"}')
     assert resp["ok"] and deps.video.stopped == 1
     resp, _ = ask('{"cmd":"video_params"}')
@@ -310,14 +317,15 @@ def test_video_build_args():
         "ffmpeg", "-hide_banner", "-loglevel", "warning",
         "-f", "kmsgrab", "-i", "-",
         "-vf", "hwdownload,format=nv12",
-        "-c:v", "h264_rkmpp", "-bf", "0", "-g", "60", "-b:v", "4M",
-        "-f", "h264", "udp://192.168.1.50:9202",
+        "-c:v", "h264_rkmpp", "-bf", "0", "-g", "60", "-b:v", "4M", "-r", "30",
+        "-f", "h264", "-",          # stdout：泵线程 packetize 后发 UDP（§4 包头）
     ], args
     args2 = src.build_args(resolution=(1280, 720), fps=60, bitrate="8M",
                            udp_target="192.168.1.50:9202")
     assert args2[args2.index("-s") + 1] == "1280x720"
     assert args2[args2.index("-g") + 1] == "120", "GOP = fps*2"
     assert args2[args2.index("-b:v") + 1] == "8M"
+    assert args2[args2.index("-r") + 1] == "60", "输出帧率必须真钳制"
     assert src.is_available
     try:
         src.build_args(udp_target=None)
@@ -325,6 +333,229 @@ def test_video_build_args():
     except ValueError:
         pass
     print("VIDEO BUILD_ARGS OK")
+
+
+def test_video_codec_pick():
+    """编码器候选链：-encoders 短名单 + 1 帧真编码验证；libx264 兜底带零延迟参数。"""
+    from types import SimpleNamespace
+
+    from server_rk import video as V
+
+    def listing_run(*codecs, probe_rc=0):
+        out = "".join(f" V....D {c:<19} Foo encoder {c}\n" for c in codecs)
+
+        def run(args, **kw):
+            if "-encoders" in args:
+                return SimpleNamespace(stdout=out, returncode=0)
+            return SimpleNamespace(stdout="", returncode=probe_rc)
+        return run
+
+    # 候选序：rkmpp 优先；缺 rkmpp 落 v4l2m2m；名单全缺抛 RuntimeError
+    assert V.pick_codec("ffmpeg", run=listing_run("h264_rkmpp", "libx264")) == "h264_rkmpp"
+    assert V.pick_codec("ffmpeg", run=listing_run("h264_v4l2m2m", "libx264")) == "h264_v4l2m2m"
+    try:
+        V.pick_codec("ffmpeg", run=listing_run("libx264rgb", "mpeg4_v4l2m2m"))
+        raise AssertionError("全缺应抛 RuntimeError")
+    except RuntimeError as exc:
+        assert "无可用" in str(exc)
+
+    # 名单里有 ≠ 真能编：RK3562 的 v4l2m2m 起会话即死 → 验证失败落 libx264
+    all_listed = listing_run("h264_rkmpp", "h264_v4l2m2m", "libx264")
+
+    def selective_run(args, **kw):
+        base = all_listed(args, **kw)
+        if "-c:v" in args and "h264" in args[args.index("-c:v") + 1]:
+            base.returncode = 1      # 两个 h264_* 候选起会话即失败
+        return base
+
+    assert V.pick_codec("ffmpeg", run=selective_run) == "libx264"
+    # 全部候选真编码都失败 → RuntimeError 带失败名单
+    try:
+        V.pick_codec("ffmpeg", run=listing_run("libx264", probe_rc=1))
+        raise AssertionError("探测全失败应抛 RuntimeError")
+    except RuntimeError as exc:
+        assert "libx264" in str(exc)
+
+    # start() 经注入的 picker 选 libx264 → 命令行带 ultrafast/zerolatency
+    procs = []
+
+    def factory(args, **kw):
+        proc = _FakeProc()
+        procs.append((args, proc))
+        return proc
+
+    src = V.FFmpegVideoSource(ffmpeg_path="ffmpeg", finder=lambda: "ffmpeg",
+                              popen_factory=factory,
+                              codec_picker=lambda p: "libx264",
+                              pipeline_picker=lambda p: V.KMSGRAB_PIPELINE)
+    ok, msg = src.start(udp_target="127.0.0.1:9202")
+    assert ok and "libx264" in msg
+    args = procs[0][0]
+    assert args[args.index("-c:v") + 1] == "libx264"
+    assert args[args.index("-preset") + 1] == "ultrafast"
+    assert args[args.index("-tune") + 1] == "zerolatency"
+    assert args[-3:] == ["-f", "h264", "-"], "输出段必须是 -f h264 -（stdout 由泵打包）"
+    assert args.index("-tune") < args.index("-f", args.index("-tune")), "附加参数在 -f h264 之前"
+    assert src.describe()["codec"] == "libx264"
+    # 软编实时性钳制：默认 30fps→12（A53 实测 0.52x，不钳会积压延迟）；
+    # 分辨率跟随采集源（镜像桌面不放大）
+    assert args[args.index("-r") + 1] == str(V.SOFT_CODEC_MAX_FPS)
+    # 显式低请求不放大：fps=5 保持 5
+    procs.clear()
+    src.stop()
+    ok, _ = src.start(fps=5, udp_target="127.0.0.1:9202")
+    assert ok and procs[0][0][procs[0][0].index("-r") + 1] == "5"
+
+    # picker 抛 RuntimeError → start 明确失败（不炸进程）
+    src2 = V.FFmpegVideoSource(ffmpeg_path="ffmpeg", finder=lambda: "ffmpeg",
+                               popen_factory=factory,
+                               codec_picker=lambda p: (_ for _ in ()).throw(RuntimeError("无可用 H.264")),
+                               pipeline_picker=lambda p: V.KMSGRAB_PIPELINE)
+    ok2, msg2 = src2.start(udp_target="127.0.0.1:9202")
+    assert not ok2 and "无可用" in msg2 and len(procs) == 1
+    print("VIDEO CODEC PICK OK")
+
+
+def test_video_pipeline_pick():
+    """采集管线候选链：kmsgrab 滤镜链失败落 x11grab（按插槽/授权展开）；全败报错。"""
+    import os
+    import tempfile
+    from types import SimpleNamespace
+
+    from server_rk import video as V
+
+    def make_run(kms_ok: bool, x11_ok: bool):
+        def run(args, **kw):
+            if "kmsgrab" in args:
+                return SimpleNamespace(stdout="", returncode=0 if kms_ok else 1)
+            if "x11grab" in args:
+                return SimpleNamespace(stdout="", returncode=0 if x11_ok else 1)
+            raise AssertionError(f"意外探测调用: {args}")
+        return run
+
+    # kmsgrab 可用 → 直接入选（设计稿目标路径）
+    pipe = V.pick_pipeline("ffmpeg", run=make_run(True, False),
+                           env={}, x11_socket_dir="/nonexistent-x11")
+    assert pipe["name"] == "kmsgrab" and pipe["vf"] == "hwdownload,format=nv12"
+
+    # RK3562 真板形态：kmsgrab 滤镜链崩、x11grab 会话可用 → 落 x11grab 带 DISPLAY/auth
+    with tempfile.TemporaryDirectory() as td:
+        open(os.path.join(td, "X0"), "wb").close()   # 模拟 /tmp/.X11-unix/X0 插槽
+        pipe3 = V.pick_pipeline("ffmpeg", run=make_run(False, True),
+                                env={"XAUTHORITY": "/tmp/fake-auth"},
+                                x11_socket_dir=td)
+        assert pipe3["name"] == "x11grab:0", pipe3["name"]
+        assert pipe3["extra_env"]["DISPLAY"] == ":0"
+        assert pipe3["extra_env"]["XAUTHORITY"] == "/tmp/fake-auth"
+
+        # 全败（kmsgrab 崩 + 无 x11 会话）→ RuntimeError
+        try:
+            V.pick_pipeline("ffmpeg", run=make_run(False, True),
+                            env={}, x11_socket_dir="/nonexistent-x11")
+            raise AssertionError("全败应抛 RuntimeError")
+        except RuntimeError as exc:
+            assert "无可用采集管线" in str(exc)
+    print("VIDEO PIPELINE PICK OK")
+
+
+def test_video_pump_packetize():
+    """泵线程：ffmpeg stdout 裸 Annex-B → §4 包头 UDP 包（seq 递增/IDR 标志/分片）。"""
+    import socket as _socket
+    import struct as _struct
+    from server_rk import video as V
+
+    class _PipeProc:
+        pid = 4321
+        returncode = None
+
+        def __init__(self, data):
+            self.stdout = io.BytesIO(data)
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    sps_pps = b"\x00\x00\x00\x01gSPS" + b"\x00\x00\x00\x01hPPS"
+    idr_big = b"\x00\x00\x00\x01e" + b"Z" * 2500      # >1200 触发分片
+    proc = _PipeProc(sps_pps + idr_big)
+
+    sent = []
+
+    class _Sock:
+        def sendto(self, data, addr):
+            sent.append(data)
+
+    src = V.FFmpegVideoSource(ffmpeg_path="ffmpeg", finder=lambda: "ffmpeg",
+                              popen_factory=lambda a, **kw: proc,
+                              codec_picker=lambda p: "h264_rkmpp",
+                              pipeline_picker=lambda p: V.KMSGRAB_PIPELINE)
+    src._proc = proc
+    src._pipeline = V.KMSGRAB_PIPELINE
+    src._pump(_Sock(), ("192.0.2.9", 9202))
+
+    assert len(sent) == 5, f"SPS+PPS+IDR(3 片) 应共 5 包，实 {len(sent)}"
+    # 全部包可被 PC 端口径还原：拆头 → payload 拼接 → 切 NAL
+    payload = b"".join(d[9:] for d in sent)
+    nals = V.split_nal_frames(payload)
+    assert [n[0][:1] for n in nals] == [b"g", b"h", b"e"], "还原出 SPS/PPS/IDR"
+    assert nals[2][1] is True and nals[0][1] is False, "IDR 标志只在 nal type 5"
+    # seq 连续 + IDR 包 flags 带关键帧位
+    seqs = [_struct.unpack(">IIB", d[:9])[0] for d in sent]
+    assert seqs == [0, 1, 2, 3, 4], seqs
+    idr_flags = [_struct.unpack(">IIB", d[:9])[2] for d in sent[2:]]
+    assert all(f & V.FLAG_KEYFRAME for f in idr_flags), "IDR 分片全部带关键帧位"
+    assert not (_struct.unpack(">IIB", sent[0][:9])[2] & V.FLAG_KEYFRAME), "SPS 不带关键帧位"
+    print("VIDEO PUMP PACKETIZE OK")
+
+
+def test_video_start_instant_death():
+    """ffmpeg 起进程即退出（编码器/采集不可用）→ start 明确失败并复位编码缓存。"""
+    from server_rk import video as V
+
+    class _DeadProc:
+        pid = 4321
+        returncode = 1        # poll() 非 None 后 start 读它拼报错
+
+        def poll(self):
+            return 1          # 立即退出
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 1
+
+    procs = []
+
+    def factory(args, **kw):
+        proc = _DeadProc()
+        procs.append((args, proc))
+        return proc
+
+    src = V.FFmpegVideoSource(ffmpeg_path="ffmpeg", finder=lambda: "ffmpeg",
+                              popen_factory=factory,
+                              codec_picker=lambda p: "libx264",
+                              pipeline_picker=lambda p: V.KMSGRAB_PIPELINE)
+    ok, msg = src.start(udp_target="127.0.0.1:9202")
+    assert not ok and "启动即退出" in msg, msg
+    assert src.describe()["running"] is False
+    assert src.describe()["codec"] is None, "立死后编码缓存必须复位"
+    assert src.describe()["capture"] is None, "立死后采集管线缓存必须复位"
+    # 复位后再次 start 重新走探测（不再拿旧 codec 直接构造）
+    ok2, msg2 = src.start(udp_target="127.0.0.1:9202")
+    assert not ok2 and len(procs) == 2
+    print("VIDEO START INSTANT DEATH OK")
 
 
 def test_video_lifecycle():
@@ -338,7 +569,9 @@ def test_video_lifecycle():
         return proc
 
     src = V.FFmpegVideoSource(ffmpeg_path="ffmpeg", finder=lambda: "ffmpeg",
-                              popen_factory=factory)
+                              popen_factory=factory,
+                              codec_picker=lambda p: "h264_rkmpp",
+                              pipeline_picker=lambda p: V.KMSGRAB_PIPELINE)
     ok, msg = src.start(fps=30, bitrate="4M", udp_target="127.0.0.1:9202")
     assert ok and procs[0][1].pid == 4321 and src.describe()["running"]
     # 重复 start 拒绝
@@ -517,6 +750,10 @@ def run_tests() -> int:
     test_control_dispatch()
     test_control_tcp()
     test_video_build_args()
+    test_video_codec_pick()
+    test_video_pipeline_pick()
+    test_video_pump_packetize()
+    test_video_start_instant_death()
     test_video_lifecycle()
     test_packetize_symmetry()
     test_serial_bridge()
