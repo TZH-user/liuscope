@@ -562,7 +562,7 @@ class DeviceScreenPage(QtWidgets.QWidget):
         self.spin_control.setToolTip('控制面 TCP 端口（设计 §4，server_rk 监听）')
         self.edit_code = QtWidgets.QLineEdit(read_setting('linux/pairing_code',
                                                           PAIRING_CODE_DEFAULT))
-        self.edit_code.setMaximumWidth(80)
+        self.edit_code.setMaximumWidth(96)   # 80px 会把 246810 裁显成 46810（值不裁）
         self.edit_code.setToolTip('控制通道配对码（M2 明文版；与板端 server_rk 配置一致）')
         self.edit_code.editingFinished.connect(
             lambda: write_setting('linux/pairing_code', self.edit_code.text().strip()))
