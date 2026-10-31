@@ -911,6 +911,13 @@ def test_control_channel():
     win.wave.btn_sim.setChecked(False)
     win._port_watch_timer.stop()
     win.close()
+    # 两段式关窗：收尾在 singleShot(0) 的 finalize——放行事件循环至收尾完成
+    for _ in range(50):
+        app.processEvents()
+        if getattr(win, '_finalized', False):
+            break
+        time.sleep(0.01)
+    assert getattr(win, '_finalized', False), '关窗收尾应在下一拍完成'
     assert not win._control_channel.listening, '关窗应停掉控制通道（释放端口）'
     print('CONTROL CHANNEL OK')
 
@@ -3170,7 +3177,8 @@ def test_device_screen_control():
                 resp = {'ok': True, 'session': 'sess-1'}
             elif cmd == 'video_start':
                 resp = {'ok': True, 'target': f'127.0.0.1:{req.get("listen_port")}',
-                        'note': 'ffmpeg pid=4321'}
+                        'note': 'ffmpeg pid=4321 overlay=on',
+                        'now_ms': 1_000_000, 'overlay': True}
             elif cmd == 'video_stop':
                 conn.sendall(b'{"ok": true, "stopped": true}\n')
                 break
@@ -3201,6 +3209,21 @@ def test_device_screen_control():
     assert cmds[:3] == ['hello', 'pair', 'video_start'], cmds
     assert recv_lines[1].get('challenge') == 'CH7', 'pair 必须回显 hello 的 challenge'
     assert recv_lines[2].get('listen_port') == 9300, '收流端口必须透传给板端'
+    # 实时性证明链：应答 now_ms → 以收到时刻为基准估板钟差；overlay 上报 → 状态行提示跑表
+    assert client.board_overlay is True, 'overlay 上报必须透传'
+    assert client.board_offset_ms is not None, 'now_ms 必须折算出板钟差'
+    assert abs(client.board_offset_ms - (1_000_000 - time.time() * 1000)) < 500, \
+        '板钟差 = 板端应答时刻 - PC 收到应答时刻（不能用折半 RTT，会虚增 handler/2）'
+    assert any('跑表' in txt for txt, _ in reports), reports
+    from ui.device_screen import transport_delay_ms
+    # 单向时延：ts32 恰为板钟低 32 位（无回绕）；延迟 = 收包时刻 - 等效发包时刻
+    pc_now = time.time() * 1000
+    board_now = pc_now + client.board_offset_ms
+    assert abs(transport_delay_ms(int(board_now - 40) & 0xFFFFFFFF, pc_now,
+                                  client.board_offset_ms) - 40) < 5, '40ms 时延应估出'
+    # u32 回绕：发包在 2^32 边界前 16ms，收包在边界后 9ms（延迟 25ms）
+    assert abs(transport_delay_ms(0xFFFFFFF0, (1 << 32) + 9, 0.0) - 25) < 5, \
+        '回绕差值应按有符号解读'
 
     # 停止：同连接发 video_stop 后线程自然退出
     client.request_stop()

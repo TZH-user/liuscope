@@ -51,6 +51,20 @@ _HEADER = struct.Struct('>IIB')   # [seq u32][ts_ms u32][flags u8]，网络字�
 _START_CODE = b'\x00\x00\x01'
 _NAL_SC = b'\x00\x00\x00\x01'     # 对外统一补 4 字节起始码（Annex-B）
 
+
+def transport_delay_ms(ts32: int, now_epoch_ms: float, offset_ms: float) -> float:
+    """单向传输时延估算（实时性量化证明）。
+
+    ts32 = 板端发包时刻的 epoch 毫秒（u32 截断，≈49.7 天回绕一次，符号回卷处理）；
+    offset_ms = 板端钟 - PC 钟（video_start 应答的 now_ms 折半 RTT 估出，板钟不准
+    也无妨——板钟没 NTP 校时照样能用）。延迟 = PC 收到时刻 - PC 等效发包时刻。
+    """
+    ref = int(now_epoch_ms + offset_ms) & 0xFFFFFFFF
+    d = (int(ts32) - ref) & 0xFFFFFFFF
+    if d >= 0x80000000:
+        d -= 0x100000000
+    return -d
+
 # GL 常量（PySide6 不暴露 GL 头文件常量，手写值）
 _GL_TEXTURE_2D = 0x0DE1
 _GL_RGB = 0x1907
@@ -113,6 +127,7 @@ class H264UdpSource(QtCore.QThread):
         self.dup_count = 0
         self.packet_count = 0
         self.bytes_count = 0
+        self.last_ts_ms: int | None = None   # 最近一包板端发包时刻（epoch ms 低 32 位）
         self.is_bound = False
         self.sock: QUdpSocket | None = None
 
@@ -151,7 +166,8 @@ class H264UdpSource(QtCore.QThread):
         self.packet_count += 1
         if len(data) <= _HEADER.size:
             return b''
-        seq, _ts_ms, _flags = _HEADER.unpack_from(data)
+        seq, ts_ms, _flags = _HEADER.unpack_from(data)
+        self.last_ts_ms = ts_ms       # 逐帧传输时延估算用（最近一包的板端发包时刻）
         payload = data[_HEADER.size:]
         self.bytes_count += len(payload)
         if self._last_seq is not None:
@@ -394,6 +410,23 @@ class ScreenGLWidget(QOpenGLWidget):
         dpr = self.devicePixelRatioF()
         f.glViewport(0, 0, max(1, int(self.width() * dpr)), max(1, int(self.height() * dpr)))
 
+    @staticmethod
+    def _fit_viewport_rect(widget_w: int, widget_h: int,
+                           img_w: int, img_h: int, dpr: float) -> tuple[int, int, int, int]:
+        """等比缩放居中的视口矩形（设备像素）。
+
+        glViewport 的坐标系是 QOpenGLWidget 帧缓冲（控件逻辑尺寸 × devicePixelRatio），
+        不是逻辑像素——早前用逻辑宽高算视口，高 DPR 屏（125%/150%）画面被缩成 1/dpr
+        且错位（用户实报"画面小一半还不居中"）。返回 (x, y, w, h) 设备像素。
+        """
+        vw, vh = widget_w * dpr, widget_h * dpr
+        if img_w <= 0 or img_h <= 0 or vw <= 0 or vh <= 0:
+            return 0, 0, 1, 1
+        scale = min(vw / img_w, vh / img_h)
+        dw = max(1, int(img_w * scale))
+        dh = max(1, int(img_h * scale))
+        return int((vw - dw) / 2), int((vh - dh) / 2), dw, dh
+
     def _paint_gl_direct(self, f) -> bool:
         """GL 直通：纹理直传 + 着色器四边形。返回 False 表示无帧可画。"""
         info = self._latest
@@ -413,11 +446,11 @@ class ScreenGLWidget(QOpenGLWidget):
         if info is None:
             f.glBindTexture(_GL_TEXTURE_2D, 0)
             return False
-        # 等比缩放居中（视口留黑边）
-        vw, vh = self.width(), self.height()
-        scale = min(vw / info['width'], vh / info['height'])
-        dw, dh = max(1, int(info['width'] * scale)), max(1, int(info['height'] * scale))
-        f.glViewport((vw - dw) // 2, (vh - dh) // 2, dw, dh)
+        # 等比缩放居中（设备像素视口；见 _fit_viewport_rect 的 DPR 说明）
+        vx, vy, dw, dh = self._fit_viewport_rect(
+            self.width(), self.height(), info['width'], info['height'],
+            self.devicePixelRatioF())
+        f.glViewport(vx, vy, dw, dh)
         prog = self._prog
         prog.bind()
         prog.setUniformValue('uTex', 0)
@@ -480,6 +513,8 @@ class ControlClient(QtCore.QThread):
         self._connect_fn = connect_fn or (
             lambda hp, timeout: socket.create_connection(hp, timeout=timeout))
         self._stop_evt = threading.Event()
+        self.board_offset_ms: float | None = None   # 板钟-PC钟（video_start 折半 RTT）
+        self.board_overlay = False                  # 板端跑表 overlay 是否已烙进画面
 
     def request_stop(self):
         self._stop_evt.set()
@@ -511,11 +546,23 @@ class ControlClient(QtCore.QThread):
                 self._ask(sock, {'cmd': 'pair', 'code': self.code,
                                  'challenge': hello.get('challenge', '')})
                 # video_start 冷启动含板端采集/编码探测（~10s 量级），超时给足
+                t0 = time.time() * 1000
                 resp = self._ask(sock, {'cmd': 'video_start',
                                         'listen_port': self.udp_port}, timeout=20.0)
+                t1 = time.time() * 1000
+                now_ms = int(resp.get('now_ms') or 0)
+                if now_ms:
+                    # 板钟差 = 板端应答时刻 - PC 收到应答时刻。不能用折半 RTT：
+                    # video_start 的应答在长探测后才打时间戳（处理器工作横跨 t0..t1），
+                    # 折半模型会把钟差抬高 handler/2（真机实测虚增 0.5~5s 的"延迟"）；
+                    # 以收到时刻为基准误差只剩发送单程 ≈ RTT/2（局域网 1~2ms）。
+                    self.board_offset_ms = now_ms - t1
+                self.board_overlay = bool(resp.get('overlay'))
                 target = resp.get('target') or f'{self.host}:{self.udp_port}'
                 note = f'（{resp["note"]}）' if resp.get('note') else ''
-                self.report.emit(f'板端已发流 → {target}{note}', 'status_ok')
+                tip = ('；画面左上角为板端毫秒跑表（实时性定性证明）'
+                       if self.board_overlay else '')
+                self.report.emit(f'板端已发流 → {target}{note}{tip}', 'status_ok')
                 self._stop_evt.wait()          # 会话保活：等页面侧停止/关窗
                 try:
                     self._ask(sock, {'cmd': 'video_stop'}, timeout=3.0)
@@ -545,6 +592,7 @@ class DeviceScreenPage(QtWidgets.QWidget):
         self.control: ControlClient | None = None
         self._last_frame_count = 0
         self._fps = 0.0
+        self._last_delay_ms: float | None = None
 
         # ---- 工具行 ----
         self.btn_start = QtWidgets.QPushButton('开始接收')
@@ -593,12 +641,18 @@ class DeviceScreenPage(QtWidgets.QWidget):
         self.lbl_fps = QtWidgets.QLabel('帧率 -- fps')
         self.lbl_dec = QtWidgets.QLabel('解码 -- ms')
         self.lbl_lost = QtWidgets.QLabel('丢包 0')
-        for lbl in (self.lbl_fps, self.lbl_dec, self.lbl_lost):
+        self.lbl_delay = QtWidgets.QLabel('传输 --')
+        self.lbl_delay.setToolTip(
+            '单向传输时延估算 = PC 收到帧时刻 - 板端发包时刻\n'
+            '（板钟差用 video_start 应答折半 RTT 校正，板钟未校时也能用）\n'
+            '含解码/上屏排队，数值偏保守；局域网正常应在几十 ms 内')
+        for lbl in (self.lbl_fps, self.lbl_dec, self.lbl_lost, self.lbl_delay):
             lbl.setObjectName('backlog')
         stats = QtWidgets.QHBoxLayout()
         stats.addWidget(self.lbl_fps)
         stats.addWidget(self.lbl_dec)
         stats.addWidget(self.lbl_lost)
+        stats.addWidget(self.lbl_delay)
         stats.addStretch(1)
 
         lay = QtWidgets.QVBoxLayout(self)
@@ -679,6 +733,8 @@ class DeviceScreenPage(QtWidgets.QWidget):
         self.decoder = None
         self.gl_widget.clear_frame()
         self._last_frame_count = 0
+        self._last_delay_ms = None
+        self.lbl_delay.setText('传输 --')
         self.btn_start.setText('开始接收')
         self.spin_port.setEnabled(True)
         self._set_status('空闲', 'status_err')
@@ -704,6 +760,12 @@ class DeviceScreenPage(QtWidgets.QWidget):
 
     def _on_frame_ready(self, info: dict):
         self.gl_widget.set_frame(info)
+        # 传输时延逐帧更新（板端发包时刻 + 钟差 → 单向时延估算）
+        src, ctl = self.source, self.control
+        if (src is not None and src.last_ts_ms is not None and ctl is not None
+                and ctl.board_offset_ms is not None):
+            self._last_delay_ms = transport_delay_ms(
+                src.last_ts_ms, time.time() * 1000, ctl.board_offset_ms)
 
     # ---------- 统计行 ----------
 
@@ -718,6 +780,8 @@ class DeviceScreenPage(QtWidgets.QWidget):
         self.lbl_dec.setText(f'解码 {avg:.1f} ms' if avg is not None else '解码 -- ms')
         lost = self.source.lost_count if self.source else 0
         self.lbl_lost.setText(f'丢包 {lost}')
+        d = getattr(self, '_last_delay_ms', None)
+        self.lbl_delay.setText(f'传输≈{d:.0f} ms' if d is not None else '传输 --')
 
     def _set_status(self, text: str, obj_name: str):
         """状态标签（对齐 main_window.set_status：QSS objectName 切色需重 polish）。"""

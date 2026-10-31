@@ -89,7 +89,13 @@ def _h_video_start(ctx: ControlContext, req: dict) -> dict:
                             if req.get("width") and req.get("height") else None,
                             fps=req.get("fps"), bitrate=req.get("bitrate"),
                             udp_target=target)
-    return ok_resp(target=target, note=msg) if ok else error_resp(msg)
+    if not ok:
+        return error_resp(msg)
+    # now_ms = 板端 epoch 毫秒：PC 端用它对齐板钟（折半 RTT 估钟差），逐帧算单向
+    # 传输时延——实时性的量化证明。overlay = 跑表是否烙进画面（定性证明）。
+    return ok_resp(target=target, note=msg,
+                   now_ms=int(time.time() * 1000),
+                   overlay=bool(getattr(d.video, "overlay", False)))
 
 
 def _h_video_stop(ctx: ControlContext, req: dict) -> dict:

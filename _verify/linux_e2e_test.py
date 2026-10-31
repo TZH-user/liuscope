@@ -151,8 +151,10 @@ def main() -> int:
         assert resp.get('ok'), resp
         assert str(resp.get('target', '')).endswith(str(udp_port)), resp
         assert 'pid=' in resp.get('note', ''), resp
+        assert isinstance(resp.get('now_ms'), int), '应答必须带板端 epoch 毫秒（PC 算单向时延用）'
+        assert 'overlay=' in resp.get('note', ''), 'note 应明示跑表 overlay 状态'
         start_resp.update(resp)
-        return f"{resp.get('target')} {resp.get('note')}"
+        return f"{resp.get('target')} {resp.get('note')} now_ms={resp.get('now_ms')}"
     r.case('T2.6 video_start', t_video_start)
 
     def t_dup_start():

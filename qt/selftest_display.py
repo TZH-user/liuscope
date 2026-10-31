@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sys
+import time
 
 _DISPLAY_KEYS = ('log/kw_alert', 'log/kw_watch', 'log/font_pt', 'log/copy_on_select',
                  'log/stamp_mode', 'ui/on_top', 'log/ansi_render')
@@ -430,7 +431,65 @@ def test_multi_window_broadcast():
     print('MULTI WINDOW BROADCAST OK')
 
 
+def test_screen_gl_fit_dpr():
+    """视频视口等比缩放居中必须按设备像素算（glViewport 坐标系 = 逻辑尺寸 × DPR）。
+
+    用户实报：150% 缩放屏上画面缩成 1/dpr 且不居中。回归锚 = 用户实测几何
+    （1689×738 逻辑 @ dpr 1.5，帧 1024×600）：缩放后应高向撑满、水平居中。
+    """
+    from ui.device_screen import ScreenGLWidget
+    x, y, w, h = ScreenGLWidget._fit_viewport_rect(1689, 738, 1024, 600, 1.5)
+    assert (w, h) == (1889, 1107), (x, y, w, h)   # 1107=738*1.5 高向撑满
+    assert abs((x + w / 2) - (1689 * 1.5 / 2)) <= 1, '水平居中'
+    assert y == 0, '垂直方向撑满无黑边'
+    # dpr=1 退化为经典 letterbox：高向撑满（738/600 < 1689/1024），水平居中留黑边
+    x1, y1, w1, h1 = ScreenGLWidget._fit_viewport_rect(1689, 738, 1024, 600, 1.0)
+    assert (w1, h1) == (1259, 738) and y1 == 0, (x1, y1, w1, h1)
+    assert abs((x1 + w1 / 2) - 1689 / 2) <= 1, 'dpr=1 仍须水平居中'
+    print('SCREEN GL FIT DPR OK')
+
+
+def test_close_two_stage():
+    """两段式关窗：closeEvent 即刻隐藏（窗口不等收尾），重活下一拍 finalize。
+
+    旧实现把 worker 1.5s + 控制 6s + 收流/解码 3s×2 + CLI 1s 全内联在 closeEvent，
+    最坏 ~14s 无响应 = 用户报"关闭按钮失效"。回归锚：close() 返回后窗口立刻不可见，
+    再一轮事件循环后收尾全部完成（worker 拆干净、quitOnLastWindowClosed 还原）。
+    """
+    import ui.main_window as mw
+
+    from PySide6 import QtWidgets
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = mw.MainWindow()
+    win.show()
+    win._port_watch_timer.stop()
+    app.processEvents()                     # 先放行前序测试窗口遗留的 finalize（全局旗标会还原）
+    saved_quit = app.quitOnLastWindowClosed()
+    try:
+        t0 = time.perf_counter()
+        win.close()
+        close_ms = (time.perf_counter() - t0) * 1000
+        assert not win.isVisible(), 'closeEvent 必须即刻隐藏窗口（不等收尾）'
+        assert close_ms < 300, f'close() 应瞬时返回，实 {close_ms:.0f}ms'
+        for _ in range(50):                    # 放行 singleShot(0) 的 finalize
+            app.processEvents()
+            if getattr(win, '_finalized', False):
+                break
+            time.sleep(0.01)
+        assert getattr(win, '_finalized', False), 'finalize 必须在下一拍执行'
+        assert win.worker is None, '收尾必须拆干净 worker'
+        assert app.quitOnLastWindowClosed() == saved_quit, 'quitOnLastWindowClosed 必须还原'
+        assert all(w is not win for w in mw._LIVE_WINDOWS), '注册表必须除名'
+    finally:
+        app.setQuitOnLastWindowClosed(saved_quit)
+        if win in mw._LIVE_WINDOWS:
+            mw._LIVE_WINDOWS.remove(win)
+    print('CLOSE TWO STAGE OK')
+
+
 def groups():
     return [test_rx_keyword_highlight, test_log_font_zoom,
             test_break_and_line_signals, test_qol_settings, test_find_regex,
-            test_status_elide, test_multi_window_broadcast]
+            test_status_elide, test_multi_window_broadcast,
+            test_screen_gl_fit_dpr, test_close_two_stage]

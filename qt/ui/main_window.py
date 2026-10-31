@@ -53,6 +53,10 @@ NEWLINE_BYTES = {'无': b'', 'LF': b'\n', 'CR': b'\r', 'CRLF': b'\r\n'}
 
 # 多会话窗口注册表：每窗口=独立串口会话（各自 worker/日志/页面），广播发送与标题编号用
 _LIVE_WINDOWS: list = []
+# 收不回的 worker 停尸房：串口线程卡死在内核调用（USB 串口假死）时 wait(1500) 收不回，
+# deleteLater 会带线程销毁（"QThread: Destroyed while thread is still running" 可致崩溃）
+# ——只扣引用不销毁，进程退出统一回收。
+_ZOMBIE_WORKERS: list = []
 
 # AI 通道 settings_set/get 的键别名（英文键 + 中文常用名 → 规范键）
 _SETTING_ALIASES = {
@@ -1216,7 +1220,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.worker:
             return
         self.worker.stop()
-        self.worker.deleteLater()
+        if getattr(self.worker, 'isRunning', lambda: False)():
+            # 线程卡死在内核调用（USB 串口假死）：销毁会连带运行中的线程，可致崩溃
+            # ——只扣进停尸房保引用，进程退出统一回收（见 _ZOMBIE_WORKERS 注）
+            _ZOMBIE_WORKERS.append(self.worker)
+        else:
+            self.worker.deleteLater()
         self.worker = None
         self._update_connect_button()
         self._auto_log.close()  # 断开即落盘收尾（文件名保留，重连后追加同一文件）
@@ -1228,23 +1237,59 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_status.style().polish(self.lbl_status)
 
     def closeEvent(self, event):  # noqa: N802 (Qt 命名)
+        """关窗两段式：窗口立即消失，线程/进程收尾异步进行。
+
+        旧的"全部内联收尾"在串口洪泛 + 视频流 + CLI 子进程等状态下要把多条
+        bounded-wait 串着等完（worker 1.5s + 控制 6s + 收流 3s + 解码 3s + CLI 1s，
+        最坏 ~14s，USB 串口假死时 close() 还会在内核再卡），表现为点 X 没反应
+        （"关闭按钮失效"）。现在 closeEvent 只做轻量收尾并隐藏窗口，重活挪进
+        _finalize_close（singleShot 下一拍），最后一个窗口由它负责 app.quit()。
+        """
+        event.accept()
         if self in _LIVE_WINDOWS:
             _LIVE_WINDOWS.remove(self)
+        if getattr(self, '_finalized', False):
+            super().closeEvent(event)
+            return
         if self._txseq_dialog is not None:
             self._txseq_dialog.close()
         self._save_connect_settings()
         if getattr(self, '_port_watch_timer', None):
             self._port_watch_timer.stop()
         self._auto_log.close()
-        self.recorder.stop()
-        self._control_channel.stop()
-        self.wave.stop_timers()
-        self.spectrum.stop_timers()
-        self.stm32.shutdown()
-        self.device_screen.shutdown()   # v2：设备屏收流/解码线程收尾
-        self._stop_file_send('窗口关闭')
-        self._teardown_worker()
+        # 阻止"最后窗口关闭即退出"在收尾完成前把事件循环退掉（video_stop 必须能发出）
+        app = QtWidgets.QApplication.instance()
+        self._quit_on_last_saved = app.quitOnLastWindowClosed()
+        if not _LIVE_WINDOWS:
+            app.setQuitOnLastWindowClosed(False)
+        QtCore.QTimer.singleShot(0, self._finalize_close)
         super().closeEvent(event)
+
+    def _finalize_close(self):
+        """重收尾（closeEvent 下一拍执行）：窗口已隐藏，用户不再感知等待。"""
+        if getattr(self, '_finalized', False):
+            return
+        self._finalized = True
+        try:
+            self.recorder.stop()
+            self._control_channel.stop()
+            self.wave.stop_timers()
+            self.spectrum.stop_timers()
+            self.stm32.shutdown()
+            self.device_screen.shutdown()   # v2：设备屏收流/解码线程收尾
+            self._stop_file_send('窗口关闭')
+            self._teardown_worker()
+        finally:
+            # 收尾自身出异常也要照常退出（窗口已经关了，留着无窗进程没意义）
+            app = QtWidgets.QApplication.instance()
+            if not getattr(self, '_quit_on_last_saved', True):
+                return                  # 原本就不随最后窗口退出：保持原行为
+            app.setQuitOnLastWindowClosed(True)
+            left = [w for w in app.topLevelWidgets()
+                    if w is not self and w.isVisible() and not w.testAttribute(
+                        QtCore.Qt.WidgetAttribute.WA_DontShowOnScreen)]
+            if not _LIVE_WINDOWS and not left:
+                app.quit()
 
     # ---------- RX 管线 ----------
 

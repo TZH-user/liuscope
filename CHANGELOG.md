@@ -6,6 +6,9 @@
 ## [Unreleased]
 
 ### 新增
+- **板卡镜像实时性证明（跑表 overlay + 单向时延统计）**：板端起流前 1 帧真探测 drawtext（`server_rk/video.py` STOPWATCH_VF，Debian ffmpeg 带 freetype；探测失败自动降级 overlay=off 并在 note/status 行明示），把流内 PTS 跑表（h:mm:ss.ms，起流归零）烙进画面左上角——镜像里跑表以 1x 真实速度跳动 = 帧"现在"采的（证据 stopwatch_t0/t1.png：3.500→4.750，1.2s 墙钟差 1.250s）；video_start 应答新增 now_ms（板端 epoch 毫秒）与 overlay 字段，PC 端 ControlClient 以"应答时刻"为基准估板钟差（**不能用折半 RTT**——video_start 应答在长探测后打戳，折半模型把钟差抬高 handler/2，真机实测虚增 0.5~5s"延迟"），H264UdpSource 记录逐包板端发包时刻，页面统计行新增「传输≈x ms」逐帧刷新（transport_delay_ms，u32 回绕符号回卷，板钟未校时也能用）。配套低延迟三件套：采集帧率对齐输出帧率（30 进 12 出会在滤镜链积 1s）、-fflags nobuffer、-flush_packets 1（缺省 32KB stdout 缓冲在 ~12KB/s 输出下积 ~1s 恒定滞后）——真机实测传输时延 978/2984ms → 8ms。
+
+### 修复
 - **「Linux 支持」页控制面打通（M2 收口：桌面回传从"等流"变"一键触发"）**：页上补控制通道客户端（`ui/device_screen.py` ControlClient）——开始接收即经 TCP 9201 hello→pair→video_start（板端推断 PC 地址 + listen_port 透传，配对码页上可改），停止时同连接 video_stop 收尾；板端 server_rk 未运行时只报控制失败、UDP 收流继续。板端配套：采集管线候选链（kmsgrab→x11grab，1 帧真采集探测——RK3562 上 kmsgrab 的 hwdownload 滤镜链首帧即崩，落 x11grab；`server_rk/video.py` pick_pipeline）；编码器候选链（h264_rkmpp→h264_v4l2m2m→libx264，-encoders 清单外再逐个 1 帧真编码验证——Debian ffmpeg 列得出 v4l2m2m 但无 m2m 节点）；软编实时性钳制（x264 ultrafast 720p30 实测 0.52x，fps 钳 12 防积压延迟）；**发送路径补 §4 包头**（M2 空洞：ffmpeg 直发 udp:// 是裸 Annex-B，PC 端按 [seq][ts][flags] 剥头会把码流撕碎——现 ffmpeg 输出走 stdout，板端泵线程 packetize 后再发 UDP，与 H264UdpSource 严格对称）；ffmpeg 立死检测（rc 上报 video_start）；video_start 冷启动超时给足 20s（管线/编码探测 ~10s 量级）。端到端验证：控制配对→x11grab→libx264→UDP→PC 解码 23 帧 1024x600（证据 `_verify/evidence/linux_video_frame.png`，复现 `_verify/linux_ctrl_smoke.py`/`_verify/linux_video_frame.py`）。server-rk 自测扩至 15 组，LiuScope 自测 +2 组（控制通道对话/状态省略）
 
 - **状态行省略标签（长报错不再撑宽窗口）**：连接行状态 QLabel 改 `ElidedLabel`（横向 sizePolicy Ignored + QFontMetrics.elidedText 随宽重算）——超长报错（如串口打开失败的 pyserial 原文）超宽出「…」，悬停 tooltip 常驻完整原文；text() 仍返回全文（测试/逻辑口径不变）。打开失败处置提示补 winerror 31（PermissionError(13,…,None,31)「连到系统上的设备没有发挥作用」）专属分支：多为被占用或 USB 适配器假死，关占用程序→重插 USB（设备管理器确认 COM 号未漂移）；该文本同时含 PermissionError，设备故障匹配必须先于笼统占用匹配
@@ -22,6 +25,9 @@
 - **ANSI 终端渲染**（日志区新开关「ANSI 渲染」，默认开，设置键 `log/ansi_render`）：串口回传的 SGR 转义按设备指定着色——16 色（按日志底色明暗自动切深/浅两套端末调色板，鲁班猫等 Linux 串口控制台、ESP-IDF 日志色码直接受益）、256 色、真彩；粗体/斜体/下划线/删除线/反显/暗淡生效；清屏、光标移动、OSC 标题、字符集切换等对滚动日志无意义的序列自动剥除。渲染以字符格式直插文档：文本零损耗（查找 / 悬停 HEX⇄文本互转按原文工作），空格天然保排版——框线图与 ASCII 艺术字不再塌陷；设备指定色对日志底对比度 <2.0 时朝文字色混合保底。条目原文与自动保存日志始终记录原始解码结果（含转义码）。新增 `qt/core/ansi_render.py`（纯逻辑段解析）与自测 3 组；视觉证据 `_verify/evidence/ansi_render_{dark,light}.png`（复现：`_verify/ansi_demo_shot.py`）
 
 ### 修复
+- **关闭按钮"失效"（关窗最长 ~14s 无响应）**：closeEvent 原本把全部收尾内联在 GUI 线程——worker 1.5s + 控制通道 6s + 收流/解码线程 3s×2 + STM32 CLI 1s 串行等完，USB 串口假死时 pyserial close 还会在内核再卡（用户报点 X 无反应）。改两段式：closeEvent 只做轻量收尾并立即隐藏窗口（用户感知瞬时关闭），重活挪 singleShot(0) 的 _finalize_close（try/finally 保证异常也照常退出；最后一个窗口由它负责 app.quit，quitOnLastWindowClosed 暂关防 video_stop 发不出去）；_teardown_worker 对收不回的串口线程（卡死内核调用）改入"停尸房"只扣引用不销毁，避免带运行线程 deleteLater 的崩溃隐患。自测 +2 组（两段式关窗/视频视口 DPR）
+- **视频画面不居中不放大（高 DPI 屏缩成 1/dpr）**：ScreenGLWidget 的 glViewport 坐标系是 QOpenGLWidget 帧缓冲（逻辑尺寸 × devicePixelRatio），原实现用逻辑宽高算 letterbox——150% 屏上画面缩成 1/1.5 且错位（用户实报）。抽 _fit_viewport_rect 静态方法按设备像素计算（回归锚=用户实测几何 1689×738@1.5），QPainter 兜底路径本就逻辑坐标不受影响
+- **板端管线补丁跨 start 叠加**：起流参数补丁（跑表 drawtext/nobuffer/帧率对齐）写回缓存管线 dict 且无幂等保护——第二次 video_start 起 drawtext×2、第三次×3（真板实测 3 层 drawtext 渲染直接把延迟顶上去），全部改成员判断幂等
 - 对比度审计脚本页签清单未随 v1.3「Linux 支持」页更新（7→8）导致无法运行，已修正（现覆盖 436 项，两主题 0 违规）
 
 ## [1.3.0] - 2026-10-28

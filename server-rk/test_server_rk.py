@@ -318,6 +318,7 @@ def test_video_build_args():
         "-f", "kmsgrab", "-i", "-",
         "-vf", "hwdownload,format=nv12",
         "-c:v", "h264_rkmpp", "-bf", "0", "-g", "60", "-b:v", "4M", "-r", "30",
+        "-flush_packets", "1",      # 逐包冲刷 avio（32KB 缺省缓冲在低码率下积 ~1s 恒定滞后）
         "-f", "h264", "-",          # stdout：泵线程 packetize 后发 UDP（§4 包头）
     ], args
     args2 = src.build_args(resolution=(1280, 720), fps=60, bitrate="8M",
@@ -387,9 +388,11 @@ def test_video_codec_pick():
     src = V.FFmpegVideoSource(ffmpeg_path="ffmpeg", finder=lambda: "ffmpeg",
                               popen_factory=factory,
                               codec_picker=lambda p: "libx264",
-                              pipeline_picker=lambda p: V.KMSGRAB_PIPELINE)
+                              pipeline_picker=lambda p: V.KMSGRAB_PIPELINE,
+                              overlay_probe=lambda f, p: False)
     ok, msg = src.start(udp_target="127.0.0.1:9202")
     assert ok and "libx264" in msg
+    assert "overlay=off" in msg, "无 overlay 时 note 应明示 overlay=off"
     args = procs[0][0]
     assert args[args.index("-c:v") + 1] == "libx264"
     assert args[args.index("-preset") + 1] == "ultrafast"
@@ -410,10 +413,37 @@ def test_video_codec_pick():
     src2 = V.FFmpegVideoSource(ffmpeg_path="ffmpeg", finder=lambda: "ffmpeg",
                                popen_factory=factory,
                                codec_picker=lambda p: (_ for _ in ()).throw(RuntimeError("无可用 H.264")),
-                               pipeline_picker=lambda p: V.KMSGRAB_PIPELINE)
+                               pipeline_picker=lambda p: V.KMSGRAB_PIPELINE,
+                               overlay_probe=lambda f, p: False)
     ok2, msg2 = src2.start(udp_target="127.0.0.1:9202")
     assert not ok2 and "无可用" in msg2 and len(procs) == 1
     print("VIDEO CODEC PICK OK")
+
+
+def test_video_overlay_on():
+    """跑表 overlay 探测通过 → vf 追加 drawtext、note/describe 上报 overlay=on。"""
+    from server_rk import video as V
+
+    procs = []
+
+    def factory(args, **kw):
+        proc = _FakeProc()
+        procs.append((args, proc))
+        return proc
+
+    src = V.FFmpegVideoSource(ffmpeg_path="ffmpeg", finder=lambda: "ffmpeg",
+                              popen_factory=factory,
+                              codec_picker=lambda p: "libx264",
+                              pipeline_picker=lambda p: V.KMSGRAB_PIPELINE,
+                              overlay_probe=lambda f, p: True)
+    ok, msg = src.start(udp_target="127.0.0.1:9202")
+    assert ok and "overlay=on" in msg, msg
+    assert src.describe()["overlay"] is True
+    vf = procs[0][0][procs[0][0].index("-vf") + 1]
+    assert "drawtext" in vf and V.STOPWATCH_VF in vf, "采集链末尾应烙上跑表 overlay"
+    assert vf.startswith(V.KMSGRAB_PIPELINE["vf"] + ","), "overlay 追加在原滤镜链之后"
+    src.stop()
+    print("VIDEO OVERLAY ON OK")
 
 
 def test_video_pipeline_pick():
@@ -546,7 +576,8 @@ def test_video_start_instant_death():
     src = V.FFmpegVideoSource(ffmpeg_path="ffmpeg", finder=lambda: "ffmpeg",
                               popen_factory=factory,
                               codec_picker=lambda p: "libx264",
-                              pipeline_picker=lambda p: V.KMSGRAB_PIPELINE)
+                              pipeline_picker=lambda p: V.KMSGRAB_PIPELINE,
+                              overlay_probe=lambda f, p: False)
     ok, msg = src.start(udp_target="127.0.0.1:9202")
     assert not ok and "启动即退出" in msg, msg
     assert src.describe()["running"] is False
@@ -571,7 +602,8 @@ def test_video_lifecycle():
     src = V.FFmpegVideoSource(ffmpeg_path="ffmpeg", finder=lambda: "ffmpeg",
                               popen_factory=factory,
                               codec_picker=lambda p: "h264_rkmpp",
-                              pipeline_picker=lambda p: V.KMSGRAB_PIPELINE)
+                              pipeline_picker=lambda p: V.KMSGRAB_PIPELINE,
+                              overlay_probe=lambda f, p: False)
     ok, msg = src.start(fps=30, bitrate="4M", udp_target="127.0.0.1:9202")
     assert ok and procs[0][1].pid == 4321 and src.describe()["running"]
     # 重复 start 拒绝
@@ -751,6 +783,7 @@ def run_tests() -> int:
     test_control_tcp()
     test_video_build_args()
     test_video_codec_pick()
+    test_video_overlay_on()
     test_video_pipeline_pick()
     test_video_pump_packetize()
     test_video_start_instant_death()

@@ -38,6 +38,8 @@
 - **编码器**：h264_rkmpp → h264_v4l2m2m → libx264，`-encoders` 清单之外逐个 1 帧真编码验证（清单列得出 ≠ 能跑）；libx264 软编钳 12fps（720p30 实测 0.52x 实时，不钳会积压延迟）
 - **发送路径**：ffmpeg 输出走 stdout，板端泵线程切 NAL → packetize（§4 包头）→ UDP——ffmpeg 直发 udp:// 是裸 Annex-B 无包头，PC 端没法拆
 - 配对码：环境变量 SERVER_RK_PAIRING_CODE > 包目录 pairing_code.txt > 出厂默认 246810
+- **实时性措施**（真机 RK3562 实测传输时延 ~1s → 8ms）：采集帧率对齐输出帧率（30 进 12 出会在滤镜链积 1s）+ `-fflags nobuffer` + `-flush_packets 1`（缺省 32KB stdout 缓冲在低码率下积 ~1s 恒定滞后）+ 泵线程 read1（有多少读多少，不凑满 4096）；起流参数补丁全部幂等（跨 start 复用缓存管线，重复追加 drawtext/nobuffer 会层层叠加）
+- **跑表 overlay**（实时性定性证明）：起流前 1 帧真探测 drawtext（依赖 freetype，Debian ffmpeg 带；失败自动降级并在 note 注明 overlay=off），把流内 PTS 跑表烙进画面左上角；video_start 应答带 now_ms（板端 epoch 毫秒）与 overlay 字段，PC 端据此显示单向传输时延
 
 ### 本机测试（仓库根目录运行，Windows 即可）
 

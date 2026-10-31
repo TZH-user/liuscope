@@ -55,6 +55,18 @@ FLAG_FRAG_START = 0x02
 FLAG_FRAG_END = 0x04
 _HEADER = struct.Struct(">IIB")         # [seq u32][ts_ms u32][flags u8]，共 9 字节
 
+# 实时性证明 overlay：把流内 PTS 跑表（h:mm:ss.ms，起流归零）烙进画面左上角。
+# 镜像里跑表以真实速度跳动 = 帧"现在"采的，不是缓存/冻结画面（用户验收口径）。
+# drawtext 依赖 freetype/fontconfig（Debian 官方 ffmpeg 带）；起流前 1 帧真探测，
+# 不可用自动降级为无 overlay（note 里 overlay=off，PC 状态行同步提示）。
+STOPWATCH_VF = ("drawtext=text='%{pts\\:hms}':fontcolor=white@0.85:fontsize=26:"
+                "box=1:boxcolor=black@0.45:boxborderw=6:x=10:y=10")
+
+
+def with_stopwatch(vf: str | None) -> str:
+    """采集滤镜链末尾追加跑表 overlay（vf 可为空串）。"""
+    return f"{vf},{STOPWATCH_VF}" if vf else STOPWATCH_VF
+
 
 def find_ffmpeg():
     """探测 PATH 里的 ffmpeg；找不到返回 None（调用方据此判 is_available=False）。"""
@@ -156,24 +168,36 @@ def pick_codec(ffmpeg_path: str, run=subprocess.run) -> str:
                        + "）")
 
 
+def _default_overlay_probe(ffmpeg_path: str, pipe: dict) -> bool:
+    """跑表 overlay 探测（真实采集管线 + drawtext 1 帧；字体/滤镜不可用即 False）。"""
+    return _probe_pipeline(ffmpeg_path, {**pipe, "vf": with_stopwatch(pipe.get("vf"))},
+                           subprocess.run, os.environ)
+
+
 class FFmpegVideoSource:
     """ffmpeg 子进程封装：只管命令行构造与起停，popen_factory/finder 可注入便于测试。"""
 
     def __init__(self, ffmpeg_path: str | None = None, finder=find_ffmpeg,
                  popen_factory=subprocess.Popen, codec_picker=pick_codec,
-                 pipeline_picker=pick_pipeline):
+                 pipeline_picker=pick_pipeline, overlay_probe=None):
         self._ffmpeg_path = ffmpeg_path
         self._finder = finder
         self._popen = popen_factory
         self._codec_picker = codec_picker    # 可注入便于测试（免真跑 ffmpeg）
         self._pipeline_picker = pipeline_picker
+        self._overlay_probe = overlay_probe or _default_overlay_probe
         self._proc = None
         self._udp_sock = None                # 打包泵的发送 socket（stop 时关闭）
         self._pump_thread: threading.Thread | None = None
         self._codec: str | None = None       # start() 时探测一次并缓存
         self._pipeline: dict | None = None   # 采集管线（kmsgrab/x11grab），同上
+        self._overlay = False                # 跑表 overlay 是否已烙进 vf（describe 上报）
         self._lock = threading.Lock()
         self._last_args: list[str] | None = None
+
+    @property
+    def overlay(self) -> bool:
+        return self._overlay
 
     @property
     def is_available(self) -> bool:
@@ -213,8 +237,10 @@ class FFmpegVideoSource:
                  "-r", str(int(fps))]                         # 输出帧率真钳制（软编防积压）
         args += list(_CODEC_EXTRA_ARGS.get(codec, ()))        # 软编兜底的零延迟参数
         # 输出走 stdout（Annex-B），由 FFmpegVideoSource 的泵线程 packetize 后再发
-        # UDP——ffmpeg 直发 udp:// 是裸流，没有 §4 包头，PC 端 H264UdpSource 没法拆
-        args += ["-f", OUTPUT_FORMAT, "-"]
+        # UDP——ffmpeg 直发 udp:// 是裸流，没有 §4 包头，PC 端 H264UdpSource 没法拆。
+        # -flush_packets 1 逐包冲刷 avio：缺省 32KB stdout 缓冲在 ~12KB/s 输出下积
+        # ~1s 恒定滞后（真机实测 978ms，冲刷后回落到几十 ms 量级）
+        args += ["-flush_packets", "1", "-f", OUTPUT_FORMAT, "-"]
         return args
 
     def start(self, resolution=None, fps: int = DEFAULT_FPS,
@@ -235,10 +261,25 @@ class FFmpegVideoSource:
                     self._pipeline = self._pipeline_picker(self.ffmpeg_path)
                 except RuntimeError as exc:
                     return False, str(exc)
+            # 跑表 overlay 每次起流前探测一次（失败自动降级为无 overlay，不阻塞发流）。
+            # 补丁必须幂等：缓存管线跨 start 复用，重复追加 drawtext/nobuffer 会让
+            # 滤镜链层层叠加（真板实测 3 层 drawtext 直接把传输时延顶到 ~1s）
+            self._overlay = self._overlay_probe(self.ffmpeg_path, self._pipeline)
+            vf = self._pipeline.get("vf")
+            if self._overlay and STOPWATCH_VF not in (vf or ""):
+                self._pipeline = {**self._pipeline, "vf": with_stopwatch(vf)}
             if self._codec == SOFT_CODEC:
                 # 软编兜底的实时性钳制：fps 超软编算力往回收——超出只会积压延迟；
                 # 分辨率跟随采集源原生气（镜像桌面无需放大到 720p）
                 fps = min(int(fps or DEFAULT_FPS), SOFT_CODEC_MAX_FPS)
+            # 实时性：采集帧率对齐输出帧率 + 输入侧禁缓冲。30fps 进 12fps 出会
+            # 在滤镜/编码队列里积 ~1s 滞后（真机实测传输时延 1121ms → 对齐后大幅回落）
+            input_args = list(self._pipeline["input_args"])
+            if "-framerate" in input_args:
+                input_args[input_args.index("-framerate") + 1] = str(fps)
+            if "-fflags" not in input_args:
+                input_args = ["-fflags", "nobuffer", *input_args]
+            self._pipeline = {**self._pipeline, "input_args": input_args}
             args = self.build_args(resolution=resolution, fps=fps, bitrate=bitrate,
                                    udp_target=udp_target)
             log.info("启动 ffmpeg: %s", " ".join(args))
@@ -265,7 +306,8 @@ class FFmpegVideoSource:
                 self._proc = None
                 return False, f"ffmpeg 启动即退出（rc={rc}）：编码器/采集源不可用"
             return True, (f"ffmpeg pid={self._proc.pid} codec={self._codec} "
-                          f"capture={self._pipeline['name']}")
+                          f"capture={self._pipeline['name']} "
+                          f"overlay={'on' if self._overlay else 'off'}")
 
     def _pump(self, sock, target: tuple[str, int]):
         """ffmpeg stdout（Annex-B）→ NAL 切分 → packetize（§4 包头）→ UDP。
@@ -279,7 +321,8 @@ class FFmpegVideoSource:
         try:
             while proc is not None and proc.poll() is None:
                 out = getattr(proc, "stdout", None)
-                chunk = out.read(4096) if out is not None else b""
+                # read1：有多少读多少（read(4096) 会凑满才返回，平白加一包延迟）
+                chunk = out.read1(4096) if out is not None else b""
                 if not chunk:
                     break
                 buf.extend(chunk)
@@ -339,6 +382,7 @@ class FFmpegVideoSource:
         return {"running": running, "pid": self._proc.pid if running else None,
                 "available": self.is_available, "codec": self._codec,
                 "capture": (self._pipeline or {}).get("name"),
+                "overlay": self._overlay,
                 "args_tail": (self._last_args or [])[-6:]}
 
 
@@ -386,5 +430,4 @@ def packetize(nal_bytes: bytes, seq: int, ts_ms: int, mtu: int = DEFAULT_MTU,
             flags |= FLAG_FRAG_END
         packets.append(_HEADER.pack(seq & 0xFFFFFFFF, ts_ms & 0xFFFFFFFF, flags) + chunk)
         seq = (seq + 1) & 0xFFFFFFFF
-    return packets, seq
     return packets, seq
