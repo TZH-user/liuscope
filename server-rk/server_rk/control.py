@@ -85,10 +85,17 @@ def _h_video_start(ctx: ControlContext, req: dict) -> dict:
         f"{ctx.peer_ip}:{port}" if ctx.peer_ip else None)
     if not target:
         return error_resp("缺少 target（无法从控制连接推断 PC 地址）")
+    # 跑表 overlay 开关与透明度（用户实报常开影响看画面，PC 端可关/调淡）
+    overlay = bool(req.get("overlay", True))
+    try:
+        op = float(req["overlay_opacity"]) if req.get("overlay_opacity") is not None \
+            else 0.85
+    except (TypeError, ValueError):
+        return error_resp("overlay_opacity 必须是数字")
     ok, msg = d.video.start(resolution=(req["width"], req["height"])
                             if req.get("width") and req.get("height") else None,
                             fps=req.get("fps"), bitrate=req.get("bitrate"),
-                            udp_target=target)
+                            udp_target=target, overlay=overlay, overlay_opacity=op)
     if not ok:
         return error_resp(msg)
     # now_ms = 板端 epoch 毫秒：PC 端用它对齐板钟（折半 RTT 估钟差），逐帧算单向
@@ -108,6 +115,10 @@ def _h_video_params(ctx: ControlContext, req: dict) -> dict:
 
 
 def _h_input(ctx: ControlContext, req: dict) -> dict:
+    # 鼠标绝对定位需要 X 会话环境（DISPLAY/XAUTHORITY）——与采集管线同源喂入
+    env = getattr(ctx.deps.video, "last_env", None)
+    if env:
+        ctx.deps.injector.pointer_env = env
     applied, skipped = ctx.deps.injector.apply_events(req.get("events") or [])
     return ok_resp(applied=applied, skipped=skipped)
 

@@ -2,33 +2,26 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/) 与
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式。
-
 ## [Unreleased]
 
 ### 新增
 - **板卡镜像实时性证明（跑表 overlay + 单向时延统计）**：板端起流前 1 帧真探测 drawtext（`server_rk/video.py` STOPWATCH_VF，Debian ffmpeg 带 freetype；探测失败自动降级 overlay=off 并在 note/status 行明示），把流内 PTS 跑表（h:mm:ss.ms，起流归零）烙进画面左上角——镜像里跑表以 1x 真实速度跳动 = 帧"现在"采的（证据 stopwatch_t0/t1.png：3.500→4.750，1.2s 墙钟差 1.250s）；video_start 应答新增 now_ms（板端 epoch 毫秒）与 overlay 字段，PC 端 ControlClient 以"应答时刻"为基准估板钟差（**不能用折半 RTT**——video_start 应答在长探测后打戳，折半模型把钟差抬高 handler/2，真机实测虚增 0.5~5s"延迟"），H264UdpSource 记录逐包板端发包时刻，页面统计行新增「传输≈x ms」逐帧刷新（transport_delay_ms，u32 回绕符号回卷，板钟未校时也能用）。配套低延迟三件套：采集帧率对齐输出帧率（30 进 12 出会在滤镜链积 1s）、-fflags nobuffer、-flush_packets 1（缺省 32KB stdout 缓冲在 ~12KB/s 输出下积 ~1s 恒定滞后）——真机实测传输时延 978/2984ms → 8ms。
 
-### 修复
-- **「Linux 支持」页控制面打通（M2 收口：桌面回传从"等流"变"一键触发"）**：页上补控制通道客户端（`ui/device_screen.py` ControlClient）——开始接收即经 TCP 9201 hello→pair→video_start（板端推断 PC 地址 + listen_port 透传，配对码页上可改），停止时同连接 video_stop 收尾；板端 server_rk 未运行时只报控制失败、UDP 收流继续。板端配套：采集管线候选链（kmsgrab→x11grab，1 帧真采集探测——RK3562 上 kmsgrab 的 hwdownload 滤镜链首帧即崩，落 x11grab；`server_rk/video.py` pick_pipeline）；编码器候选链（h264_rkmpp→h264_v4l2m2m→libx264，-encoders 清单外再逐个 1 帧真编码验证——Debian ffmpeg 列得出 v4l2m2m 但无 m2m 节点）；软编实时性钳制（x264 ultrafast 720p30 实测 0.52x，fps 钳 12 防积压延迟）；**发送路径补 §4 包头**（M2 空洞：ffmpeg 直发 udp:// 是裸 Annex-B，PC 端按 [seq][ts][flags] 剥头会把码流撕碎——现 ffmpeg 输出走 stdout，板端泵线程 packetize 后再发 UDP，与 H264UdpSource 严格对称）；ffmpeg 立死检测（rc 上报 video_start）；video_start 冷启动超时给足 20s（管线/编码探测 ~10s 量级）。端到端验证：控制配对→x11grab→libx264→UDP→PC 解码 23 帧 1024x600（证据 `_verify/evidence/linux_video_frame.png`，复现 `_verify/linux_ctrl_smoke.py`/`_verify/linux_video_frame.py`）。server-rk 自测扩至 15 组，LiuScope 自测 +2 组（控制通道对话/状态省略）
+- **Linux 页鼠标控制（M3 前置：绝对坐标跟手注入）**：页上「鼠标控制」开关 → 开启后控件内点击/拖动/滚轮注入板端——坐标换算走 _fit_viewport_rect 逆映射（控件逻辑坐标 ×DPR → 设备像素 → 板屏像素，letterbox 黑边区拒绝注入），移动 25ms 合并 latest-wins（跟手且不刷爆控制通道），按下/抬起前先落一次绝对定位（光标不在目标位点击仍落所指处）。控制通道 ControlClient 会话期新增 send_command 队列（逐条问答，video_stop 收尾语义不变）。板端配套：①uinput 零依赖 raw ioctl 写入器（python-uinput 在 Debian/PEP 668 装不上——/dev/uinput ioctl+uinput_user_dev 直写，root 天然可跑，每 emit 自带 SYN_REPORT）；②鼠标绝对定位走 **X 指针子进程**：XWarpPointer 在本板 libX11 上任何非主线程调用必段错误（XInitThreads 也救不了，faulthandler 定位），专用子进程主线程持 X 连接、管道喂坐标（8 字节/条），DISPLAY/XAUTHORITY 与采集管线同源（video.last_env）；③板屏量程 SERVER_RK_SCREEN 可配（默认 1024x600）。真机验证：e2e 12/12（applied=3），光标 (80,80)→(940,520) 精确落位（证据 mouse_inject_a/b.png，相机应用对注入出现 ROI 反馈框）。
 
-- **状态行省略标签（长报错不再撑宽窗口）**：连接行状态 QLabel 改 `ElidedLabel`（横向 sizePolicy Ignored + QFontMetrics.elidedText 随宽重算）——超长报错（如串口打开失败的 pyserial 原文）超宽出「…」，悬停 tooltip 常驻完整原文；text() 仍返回全文（测试/逻辑口径不变）。打开失败处置提示补 winerror 31（PermissionError(13,…,None,31)「连到系统上的设备没有发挥作用」）专属分支：多为被占用或 USB 适配器假死，关占用程序→重插 USB（设备管理器确认 COM 号未漂移）；该文本同时含 PermissionError，设备故障匹配必须先于笼统占用匹配
-
-：多会话以「一窗一会话」落地（MobaXterm split-tab 的等效工程口径——MainWindow 整窗即会话，`_LIVE_WINDOWS` 注册表编号标题，Ctrl+N/「新窗口」再开一口；每口独立 worker/日志/波形/频谱与设置记忆，AI 控制通道按既有口径首窗独占端口）；「广播」勾选后发送同步转发到其他**已连接**窗口（各自落 TX 日志与字节统计、一跳不回环、未连接跳过；`tx/broadcast` 记忆）。自测扩至 61 组（+多窗口广播 1 组）。注：单窗内页签化会话（SessionView 抽取）列为后续项——现有 61 组自测面全部绑定 MainWindow 属性面，整页签重构收益/风险比不划算
-
-- **日志显示与操控增强（P0 批次）**：RX 关键词高亮/告警（`core/rx_highlight.py` 纯逻辑 + 设置页双表，alert 红/watch 琥珀、剥转义匹配、用户意图优先）；日志区 Ctrl+滚轮/Ctrl+=/-/0 字号缩放（`ui/log_view.py`，字号必须同时落到 document.defaultFont——控件级 QSS 只改 size 时正文仍按旧字号排版，FontChange 事件挂钩防主题切换丢缩放）；BREAK 发送 + CTS/DSR/RI/CD 信号线 500ms 轮询显示；窗口置顶、选中即复制（PuTTY 风格）、时间戳 clock/elapsed 双模式。新增 `ui/log_view.py`（LogView 控件承载等宽+缩放）与自测 5 组
-- **序列发送（P1）**：`core/tx_sequence.py`（send/sendhex/delay 解析 + QTimer 驱动 Runner：重复/循环/写失败中止）+ `ui/tx_sequence_dialog.py` 非模态对话框（脚本/重复/自动执行记忆于 txseq/*）；连接后自动执行适配自动重连场景。新增自测 2 组
-- **XMODEM/YMODEM 发送（P1）**：`core/xmodem.py` 发送端状态机（XMODEM 128B 块 CRC/checksum 自适应、YMODEM 批传输块0 文件名+大小/1024B 块/EOT/空块收尾；NAK 重发上限 10 次、tick 超时、CAN 取消；CRC16-CCITT 向量 0x31C3 锚定）；文件发送协议下拉（原样/XMODEM/YMODEM），引擎经 ingest 喂应答字节、完成/中断落 SYS 日志。新增自测 4 组（含仿真对端整环 + 主窗 UI 集成环回）
-- **正则查找（P1）**：查找条新增 `.*` 开关（re.IGNORECASE，弱高亮上限 500 同时间模式口径；无效正则给提示不崩；勾选时时刻定位停用）。自测并入显示组
-- **修复：日志区光标选区破坏 bug（存量）**——用户在日志留有选中区时，`_append_log`/TX 缩进取的是带选区的控件光标，`insertText` 会把新数据替换进选区（毁日志、吞选中）。现统一先 movePosition(End)+clearSelection 再插入；qol 自测的复制用例覆盖此路径
-
-- **日志区等宽字体 + 自动折行**（字符画错位与长行横滚问题的根治）：日志主区经 QSS `#log_view` 切等宽字体（`theme.mono_font()`，Windows 命中 Consolas，CJK 字形 Qt 自动回落 YaHei UI）——字符画/框线图/HEX 列/IDF 时间戳按终端「1 字符=1 格」网格对齐，鲁班猫 motd 猫画不再被全局比例字体压歪；折行从 NoWrap 改 WidgetWidth + `WrapAtWordBoundaryOrAnywhere`——长行/长 HEX 串超出视口宽自动断到下一行，窗口缩放即时重排。注意字体必须走 QSS 注入：样式表字体优先级压过 `setFont`；`theme` 模块会在建 QApplication 前被导入，`DARK_QSS/LIGHT_QSS` 兼容常量改 PEP 562 懒生成（模块级 `_build_qss` 在无 app 时调 `QFontDatabase` 会原生崩溃）。自测扩至 49 组（新增 `test_log_wrap_mono_art`：等宽命中/折行配置/缩放重排/猫画逐字节保真）；视觉证据 `_verify/evidence/ansi_motd_art_mono.png`（复现：`_verify/ansi_motd_art_shot.py`，内嵌板上 00-header 渲染真字节）
-- **ANSI 终端渲染**（日志区新开关「ANSI 渲染」，默认开，设置键 `log/ansi_render`）：串口回传的 SGR 转义按设备指定着色——16 色（按日志底色明暗自动切深/浅两套端末调色板，鲁班猫等 Linux 串口控制台、ESP-IDF 日志色码直接受益）、256 色、真彩；粗体/斜体/下划线/删除线/反显/暗淡生效；清屏、光标移动、OSC 标题、字符集切换等对滚动日志无意义的序列自动剥除。渲染以字符格式直插文档：文本零损耗（查找 / 悬停 HEX⇄文本互转按原文工作），空格天然保排版——框线图与 ASCII 艺术字不再塌陷；设备指定色对日志底对比度 <2.0 时朝文字色混合保底。条目原文与自动保存日志始终记录原始解码结果（含转义码）。新增 `qt/core/ansi_render.py`（纯逻辑段解析）与自测 3 组；视觉证据 `_verify/evidence/ansi_render_{dark,light}.png`（复现：`_verify/ansi_demo_shot.py`）
+- **跑表开关与透明度（用户实报常开影响看画面）**：页上「跑表」复选框 + 透明度 10%~100%，改动落盘且发流中自动重起流生效（真机 pid 更替验证）；板端 video_start 受理 overlay/overlay_opacity，STOPWATCH_VF 参数化（fontcolor 与底框同比例淡化）。
 
 ### 修复
+- **关闭按钮灰色"未响应"（Windows 幽灵窗根因）**：垃圾洪泛（错波特率/调试口乱码，150KB/s 下约 600 行/s）逐事件整行处理把 GUI 线程钉死在 posted events 里——5s 泵不到原生消息 Windows 即幽灵化（标题栏 X 变灰，点什么都没响应）。RX 入口改洪泛合并：pending 缓冲 + 16KB/拍预算消费（任意相邻消费间必回事件循环泵原生消息），超高水位丢最老并限频打标（统计行「洪泛丢弃 N」），小数据量当场消费语义不变。自测 +3 组（坐标换算/洪泛合并/跑表控件）。
+
 - **关闭按钮"失效"（关窗最长 ~14s 无响应）**：closeEvent 原本把全部收尾内联在 GUI 线程——worker 1.5s + 控制通道 6s + 收流/解码线程 3s×2 + STM32 CLI 1s 串行等完，USB 串口假死时 pyserial close 还会在内核再卡（用户报点 X 无反应）。改两段式：closeEvent 只做轻量收尾并立即隐藏窗口（用户感知瞬时关闭），重活挪 singleShot(0) 的 _finalize_close（try/finally 保证异常也照常退出；最后一个窗口由它负责 app.quit，quitOnLastWindowClosed 暂关防 video_stop 发不出去）；_teardown_worker 对收不回的串口线程（卡死内核调用）改入"停尸房"只扣引用不销毁，避免带运行线程 deleteLater 的崩溃隐患。自测 +2 组（两段式关窗/视频视口 DPR）
+
 - **视频画面不居中不放大（高 DPI 屏缩成 1/dpr）**：ScreenGLWidget 的 glViewport 坐标系是 QOpenGLWidget 帧缓冲（逻辑尺寸 × devicePixelRatio），原实现用逻辑宽高算 letterbox——150% 屏上画面缩成 1/1.5 且错位（用户实报）。抽 _fit_viewport_rect 静态方法按设备像素计算（回归锚=用户实测几何 1689×738@1.5），QPainter 兜底路径本就逻辑坐标不受影响
+
 - **板端管线补丁跨 start 叠加**：起流参数补丁（跑表 drawtext/nobuffer/帧率对齐）写回缓存管线 dict 且无幂等保护——第二次 video_start 起 drawtext×2、第三次×3（真板实测 3 层 drawtext 渲染直接把延迟顶上去），全部改成员判断幂等
+
 - 对比度审计脚本页签清单未随 v1.3「Linux 支持」页更新（7→8）导致无法运行，已修正（现覆盖 436 项，两主题 0 违规）
+
 
 ## [1.3.0] - 2026-10-28
 

@@ -43,10 +43,12 @@ class _FakeVideo:
     def is_available(self):
         return self.available
 
-    def start(self, resolution=None, fps=None, bitrate=None, udp_target=None):
+    def start(self, resolution=None, fps=None, bitrate=None, udp_target=None,
+              overlay=True, overlay_opacity=0.85):
         if not self.available:
             return False, "ffmpeg 未找到（PATH 中无 'ffmpeg'），视频功能不可用"
         self.started = (resolution, fps, bitrate, udp_target)
+        self.overlay_req = (overlay, overlay_opacity)
         return True, "ffmpeg pid=11111"
 
     def stop(self):
@@ -443,6 +445,23 @@ def test_video_overlay_on():
     assert "drawtext" in vf and V.STOPWATCH_VF in vf, "采集链末尾应烙上跑表 overlay"
     assert vf.startswith(V.KMSGRAB_PIPELINE["vf"] + ","), "overlay 追加在原滤镜链之后"
     src.stop()
+
+    # 透明度参数化 + 关闭：opacity 0.30 → fontcolor white@0.30；overlay=False 无 drawtext
+    ok2, msg2 = src.start(udp_target="127.0.0.1:9202", overlay_opacity=0.30)
+    assert ok2 and "overlay=on" in msg2
+    vf2 = procs[1][0][procs[1][0].index("-vf") + 1]
+    assert "fontcolor=white@0.30" in vf2 and "boxcolor=black@0.16" in vf2, vf2
+    src.stop()
+    ok3, msg3 = src.start(udp_target="127.0.0.1:9202", overlay=False)
+    assert ok3 and "overlay=off" in msg3
+    vf3 = procs[2][0][procs[2][0].index("-vf") + 1]
+    assert "drawtext" not in vf3 and vf3 == V.KMSGRAB_PIPELINE["vf"], vf3
+    # 缓存基线不被补丁改写（结构性幂等）：连开三次后再次带 overlay 起流，drawtext 只有一层
+    src.stop()
+    ok4, _ = src.start(udp_target="127.0.0.1:9202", overlay=True, overlay_opacity=0.85)
+    vf4 = procs[3][0][procs[3][0].index("-vf") + 1]
+    assert ok4 and vf4.count("drawtext") == 1, f"drawtext 层数={vf4.count('drawtext')}"
+    src.stop()
     print("VIDEO OVERLAY ON OK")
 
 
@@ -704,12 +723,14 @@ def test_input_inject_mapping():
         {"t": "key", "key": 0x01000021, "down": True},  # Ctrl → KEY_LEFTCTRL(29)
         {"t": "key", "key": 0x30},                      # '0' → KEY_0(11)
         {"t": "mouse_move", "dx": 12, "dy": -3},
+        {"t": "mouse_abs", "x": 500, "y": 300},         # 绝对定位（跟手镜像）
+        {"t": "mouse_abs", "x": 99999, "y": -5},        # 越界 → 钳到板屏量程
         {"t": "mouse_button", "btn": "left", "down": True},
         {"t": "wheel", "dy": 1},
         {"t": "key", "key": 0x1234},                    # 未知键 → skipped + 日志
         {"t": "mystery"},                               # 未知类型 → skipped
     ])
-    assert applied == 10 and skipped == 2, (applied, skipped)
+    assert applied == 12 and skipped == 2, (applied, skipped)
     calls = dev.calls
     assert calls[0] == ((I.EV_KEY, 30), 1) and calls[1] == ((I.EV_KEY, 30), 0)
     assert ((I.EV_KEY, 28), 1) in calls
@@ -718,6 +739,10 @@ def test_input_inject_mapping():
     assert ((I.EV_KEY, 29), 1) in calls
     assert ((I.EV_KEY, 11), 1) in calls
     assert ((I.EV_REL, I.REL_X), 12) in calls and ((I.EV_REL, I.REL_Y), -3) in calls
+    w, h = I.screen_size()
+    assert ((I.EV_ABS, I.ABS_X), 500) in calls and ((I.EV_ABS, I.ABS_Y), 300) in calls
+    assert ((I.EV_ABS, I.ABS_X), w - 1) in calls and ((I.EV_ABS, I.ABS_Y), 0) in calls, \
+        "越界坐标必须钳到 [0, W-1]×[0, H-1]"
     assert ((I.EV_KEY, I.BTN_LEFT), 1) in calls
     assert ((I.EV_REL, I.REL_WHEEL), 1) in calls
     print("INPUT INJECT MAPPING OK")

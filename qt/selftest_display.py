@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import random
 import sys
 import time
 
@@ -488,8 +489,109 @@ def test_close_two_stage():
     print('CLOSE TWO STAGE OK')
 
 
+def test_screen_mouse_map():
+    """鼠标注入坐标换算：控件坐标 ×DPR → 逆 letterbox → 板屏像素，黑边区拒绝。
+
+    跟手的关键换算：中心点必须命中等比中心（512,300）；黑边/无帧必须返回 None
+    （否则点击会注入到错误坐标）。
+    """
+    from PySide6 import QtWidgets
+
+    from ui.device_screen import ScreenGLWidget
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    w = ScreenGLWidget()
+    w.resize(1689, 738)
+    app.processEvents()
+    assert w.map_to_board(10, 10) is None, '无帧必须拒绝注入'
+    w._latest = {'width': 1024, 'height': 600, 'frame': None}
+    cx, cy = w.map_to_board(w.width() / 2, w.height() / 2)
+    assert (cx, cy) == (511, 299), (cx, cy)   # 中心 → 板屏中心（×(W-1)/(H-1) 取整）
+    assert w.map_to_board(10, 10) is None, '左黑边必须拒绝'
+    assert w.map_to_board(w.width() - 1, w.height() / 2) is None, '右黑边必须拒绝'
+    # 图内有效点：左上视口起点附近（dpr=1：视口 x 从 215 起）
+    first = w.map_to_board(220, 5)
+    assert first is not None and 0 <= first[0] < 8 and 0 <= first[1] <= 5, first
+    print('SCREEN MOUSE MAP OK')
+
+
+def test_rx_flood_coalesce():
+    """RX 洪泛合并：小数据当场消费（语义不变），洪泛有界消费+丢最老+统计行打标。
+
+    根因回归锚：垃圾流逐事件整行处理会把 GUI 线程钉死在 posted events（Windows
+    5s 泵不到原生消息 → 幽灵窗 → 标题栏 X 灰）。合并后任意相邻消费间必回事件循环。
+    """
+    import ui.main_window as mw
+
+    from PySide6 import QtWidgets
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = mw.MainWindow()
+    win._port_watch_timer.stop()
+    try:
+        # 小数据：当场消费（不依赖事件循环），日志立即可见
+        win.ingest_bytes(b'FLOOD-INLINE-1\n')
+        assert 'FLOOD-INLINE-1' in win.log.toPlainText(), '小数据必须当场消费'
+        # 洪泛：640KB 随机垃圾（含换行）→ 单次 ingest 有界（预算 16KB/拍）、超限丢弃
+        rng = random.Random(41)
+        blob = bytes(rng.randrange(256) for _ in range(64 * 1024))
+        worst = 0.0
+        for _ in range(10):
+            t0 = time.perf_counter()
+            win.ingest_bytes(blob)              # 逐次灌 64KB
+            worst = max(worst, (time.perf_counter() - t0) * 1000)
+        assert worst < 400, f'洪泛下单次 ingest 必须快速返回（≤16KB 预算），实最差 {worst:.0f}ms'
+        assert win._rx_dropped > 0, '超出高水位应丢最老'
+        assert '洪泛保护' in win.log.toPlainText(), '丢弃必须打标'
+        assert '洪泛丢弃' in win.lbl_backlog.text()
+        for _ in range(200):                     # 放行 drain 定时器至排空
+            app.processEvents()
+            if not win._rx_pending:
+                break
+            time.sleep(0.01)
+        assert not win._rx_pending, '洪泛结束后 pending 必须排空（无静默丢尾）'
+    finally:
+        win.close()
+    for _ in range(50):
+        app.processEvents()
+        if getattr(win, '_finalized', False):
+            break
+        time.sleep(0.01)
+    print('RX FLOOD COALESCE OK')
+
+
+def test_screen_overlay_controls():
+    """跑表开关/透明度控件：改动落盘；未发流时不重起流（source 仍为 None）。"""
+    from PySide6 import QtWidgets
+
+    import ui.main_window as mw
+    from core.settings import read_setting
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    win = mw.MainWindow()
+    win._port_watch_timer.stop()
+    saved = (read_setting('linux/stopwatch', '1'), read_setting('linux/stopwatch_op', '85'))
+    try:
+        page = win.device_screen
+        page.chk_watch.setChecked(False)
+        page.spin_op.setValue(40)
+        page.spin_op.editingFinished.emit()
+        app.processEvents()
+        assert read_setting('linux/stopwatch', '') == '0', '开关必须落盘'
+        assert read_setting('linux/stopwatch_op', '') == '40', '透明度必须落盘'
+        assert page.source is None, '未发流时改动不得触发重起流'
+    finally:
+        from core.settings import write_setting
+        write_setting('linux/stopwatch', saved[0])
+        write_setting('linux/stopwatch_op', saved[1])
+        win.close()
+    print('SCREEN OVERLAY CONTROLS OK')
+
+
 def groups():
     return [test_rx_keyword_highlight, test_log_font_zoom,
             test_break_and_line_signals, test_qol_settings, test_find_regex,
             test_status_elide, test_multi_window_broadcast,
-            test_screen_gl_fit_dpr, test_close_two_stage]
+            test_screen_gl_fit_dpr, test_close_two_stage,
+            test_screen_mouse_map, test_rx_flood_coalesce,
+            test_screen_overlay_controls]

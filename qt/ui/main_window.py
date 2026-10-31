@@ -279,6 +279,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._line_timer.setInterval(500)
         self._line_timer.timeout.connect(self._poll_line_signals)
         self._conn_mono: float | None = None   # elapsed 时间戳基准（连接时刻）
+        # RX 洪泛合并：垃圾流（错波特率/调试口乱码）每秒可达数百行，逐事件整行
+        # 处理（appendHtml+ANSI 解析+逐段 insertText）会把 GUI 线程钉死在 posted
+        # events 里——Windows 5s 泵不到原生消息即幽灵化（标题栏 X 变灰"未响应"，
+        # 用户实报）。收进 pending 缓冲按预算逐拍消费，任意两次消费之间必然回到
+        # 事件循环泵原生消息；超高水位丢最老并打标（数据永远以自动日志/条目为准）。
+        self._rx_pending = bytearray()
+        self._rx_dropped = 0               # 本次会话累计丢弃字节数（统计行展示）
+        self._rx_drop_stamp = 0.0          # 丢弃 SYS 行限频（1s 一条）
+        self._rx_drain_timer = QtCore.QTimer(self)
+        self._rx_drain_timer.setSingleShot(True)
+        self._rx_drain_timer.setInterval(0)
+        self._rx_drain_timer.timeout.connect(self._drain_rx_pending)
         # 注意：这里不能再挂控件级静态 tooltip——Qt 会先弹它，抢掉逐行
         # HEX⇄文本转换提示框（LogHoverTip，0.4s 延迟）。
         self._log_hover = LogHoverTip(self.log)
@@ -1293,7 +1305,50 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------- RX 管线 ----------
 
+    # RX 洪泛合并参数：单次消费预算（离屏实测 ~1.2ms/行整行处理，16KB≈60 行
+    # ≈百 ms 量级/拍——任意相邻消费间必回事件循环泵原生消息，杜绝幽灵窗且
+    # 交互不掉帧）与高水位（超限丢最老——洪泛下旧垃圾没有保留价值）
+    RX_DRAIN_BUDGET = 16 * 1024
+    RX_PENDING_MAX = 256 * 1024
+
     def ingest_bytes(self, data: bytes):
+        """RX 入口：洪泛合并的入队侧。小数据量（人机交互节奏）当场消费完，
+        语义与直处理一致；大流量只做有界消费，余量留给下一拍/下一条事件。"""
+        self._rx_pending.extend(data)
+        if len(self._rx_pending) > self.RX_PENDING_MAX:
+            drop = len(self._rx_pending) - self.RX_PENDING_MAX
+            del self._rx_pending[:drop]
+            self._note_rx_drop(drop)
+        self._drain_rx_pending()
+        if self._rx_pending:
+            # 尾量（到达快于消费）交给下一拍：singleShot(0) 让事件循环先泵原生消息
+            self._rx_drain_timer.start()
+
+    def _drain_rx_pending(self):
+        self._rx_drain_timer.stop()          # 同拍重入（ingest 内联调用）先摘定时器
+        pending = self._rx_pending
+        if not pending:
+            return
+        budget = bytes(pending[:self.RX_DRAIN_BUDGET])
+        del pending[:len(budget)]
+        self._ingest_now(budget)
+        if len(pending) > self.RX_PENDING_MAX:
+            drop = len(pending) - self.RX_PENDING_MAX
+            del pending[:drop]
+            self._note_rx_drop(drop)
+        if pending:
+            self._rx_drain_timer.start()     # 余量下一拍继续（中间必有原生消息泵）
+
+    def _note_rx_drop(self, drop: int):
+        self._rx_dropped += drop
+        now = time.monotonic()
+        if now - self._rx_drop_stamp >= 1.0:     # 限频：洪泛期间 1s 一条不打爆日志
+            self._rx_drop_stamp = now
+            self._append_log('SYS', f'[洪泛保护] 接收缓冲超限，已丢弃最老 {drop} 字节'
+                                    f'（累计 {self._rx_dropped}）')
+
+    def _ingest_now(self, data: bytes):
+        """真正的 RX 处理（原 ingest_bytes 主体；按洪泛预算分批调用）。"""
         now = time.monotonic()
         self.rx_bytes_total += len(data)
         self._update_stats_label()
@@ -1432,7 +1487,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_backlog(self):
         total = self.buffer.backlog_bytes + self.wave.state.backlog_bytes
-        self.lbl_backlog.setText(f'积压 {total} B')
+        if self._rx_pending:
+            total += len(self._rx_pending)
+        if self._rx_dropped:
+            self.lbl_backlog.setText(f'积压 {total} B（洪泛丢弃 {self._rx_dropped}）')
+        else:
+            self.lbl_backlog.setText(f'积压 {total} B')
 
     # ---------- 会话录制 / 回放 ----------
 

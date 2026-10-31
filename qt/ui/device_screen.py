@@ -23,6 +23,7 @@ ControlClient 走 TCP 9201 控制通道 hello→pair→video_start（目标 = �
 from __future__ import annotations
 
 import json
+import queue
 import re
 import secrets
 import socket
@@ -348,6 +349,15 @@ class ScreenGLWidget(QOpenGLWidget):
         self._vbo: QOpenGLBuffer | None = None
         self._tex = 0
         self._tex_size: tuple[int, int] | None = None
+        # 鼠标注入（M3 前置）：开启后把控件内鼠标事件换算成板屏绝对坐标回调。
+        # 移动 25ms 合并取最新（跟手且不刷爆控制通道）；按下/滚轮即时发送。
+        self.mouse_ctl = False
+        self.inject_cb = None               # callable(events: list[dict])，页面接控制通道
+        self.setMouseTracking(True)
+        self._mouse_pending: tuple[int, int] | None = None
+        self._mouse_timer = QtCore.QTimer(self)
+        self._mouse_timer.setInterval(25)
+        self._mouse_timer.timeout.connect(self._flush_mouse_move)
 
     # ---------- 帧入口（解码线程信号 → UI 线程） ----------
 
@@ -358,6 +368,89 @@ class ScreenGLWidget(QOpenGLWidget):
     def clear_frame(self):
         self._latest = None
         self.update()
+
+    # ---------- 鼠标注入（坐标换算与事件回调） ----------
+
+    def map_to_board(self, wx: float, wy: float) -> tuple[int, int] | None:
+        """控件坐标 → 板屏像素（_fit_viewport_rect 的逆映射；letterbox 区返回 None）。
+
+        换算链：控件逻辑坐标 ×DPR → 帧缓冲设备像素 →（减视口偏移、除缩放比）→
+        板屏像素，再钳到 [0, W-1]×[0, H-1]。视口垂直居中对称，GL 的底原点
+        不影响 y 向映射。
+        """
+        info = self._latest
+        if info is None:
+            return None
+        dpr = self.devicePixelRatioF()
+        vx, vy, dw, dh = self._fit_viewport_rect(
+            self.width(), self.height(), info['width'], info['height'], dpr)
+        px, py = wx * dpr, wy * dpr
+        if not (vx <= px < vx + dw and vy <= py < vy + dh):
+            return None                      # 黑边区域：不注入
+        bw = info['width']
+        bh = info['height']
+        bx = int(max(0.0, min(1.0, (px - vx) / max(1, dw))) * (bw - 1))
+        by = int(max(0.0, min(1.0, (py - vy) / max(1, dh))) * (bh - 1))
+        return bx, by
+
+    def _inject(self, events: list[dict]):
+        if self.mouse_ctl and self.inject_cb is not None:
+            self.inject_cb(events)
+
+    def _flush_mouse_move(self):
+        pos, self._mouse_pending = self._mouse_pending, None
+        if pos is not None:
+            self._inject([{'t': 'mouse_abs', 'x': pos[0], 'y': pos[1]}])
+
+    def mousePressEvent(self, ev):  # noqa: N802 (Qt 命名)
+        self._mouse_button(ev, True)
+        super().mousePressEvent(ev)
+
+    def mouseReleaseEvent(self, ev):  # noqa: N802 (Qt 命名)
+        self._mouse_button(ev, False)
+        super().mouseReleaseEvent(ev)
+
+    def _mouse_button(self, ev, down: bool):
+        if not self.mouse_ctl or self.inject_cb is None:
+            return
+        btn = {QtCore.Qt.MouseButton.LeftButton: 'left',
+               QtCore.Qt.MouseButton.RightButton: 'right',
+               QtCore.Qt.MouseButton.MiddleButton: 'middle'}.get(ev.button())
+        if btn is None:
+            return
+        pos = self.map_to_board(ev.position().x(), ev.position().y())
+        if pos is None:
+            return
+        # 按下/抬起前先落一次绝对定位：光标不在目标位时点击仍落在所指处
+        self._inject([{'t': 'mouse_abs', 'x': pos[0], 'y': pos[1]},
+                      {'t': 'mouse_button', 'btn': btn, 'down': down}])
+
+    def mouseMoveEvent(self, ev):  # noqa: N802 (Qt 命名)
+        if self.mouse_ctl:
+            pos = self.map_to_board(ev.position().x(), ev.position().y())
+            if pos is not None:
+                self._mouse_pending = pos       # 25ms 合并，latest-wins（跟手）
+        super().mouseMoveEvent(ev)
+
+    def wheelEvent(self, ev):  # noqa: N802 (Qt 命名)
+        if self.mouse_ctl and self.inject_cb is not None:
+            dy = ev.angleDelta().y()
+            dx = ev.angleDelta().x()
+            if dy or dx:
+                self._inject([{'t': 'wheel',
+                               'dy': 1 if dy > 0 else (-1 if dy < 0 else 0),
+                               'dx': 1 if dx > 0 else (-1 if dx < 0 else 0)}])
+        super().wheelEvent(ev)
+
+    def set_mouse_ctl(self, on: bool):
+        self.mouse_ctl = bool(on)
+        self.setCursor(QtCore.Qt.CursorShape.BlankCursor if on
+                       else QtCore.Qt.CursorShape.ArrowCursor)
+        if on:
+            self._mouse_timer.start()
+        else:
+            self._mouse_timer.stop()
+            self._mouse_pending = None
 
     # ---------- GL 生命周期 ----------
 
@@ -496,28 +589,42 @@ class ControlError(RuntimeError):
 class ControlClient(QtCore.QThread):
     """控制面客户端：一条连接上 hello→pair→video_start 一气呵成，会话保活。
 
-    request_stop() 置位后同连接发 video_stop 再收尾（板端先停流、后撤 UDP，
-    避免 ffmpeg 已停而页面还在等的空转窗口）。connect_fn 可注入，自测换
+    会话期间 send_command() 可下发任意命令（鼠标注入 input 等）：线程经队列
+    取命令逐条问答；request_stop() 置位后同连接发 video_stop 再收尾（板端先停流、
+    后撤 UDP，避免 ffmpeg 已停而页面还在等的空转窗口）。connect_fn 可注入，自测换
     loopback 假服务端；report(文本, 级别) 逐步汇报，级别对应状态行配色。
     """
 
     report = QtCore.Signal(str, str)   # (状态文本, 'status_ok'|'status_warn'|'status_err')
 
+    QUEUE_MAX = 128            # 命令队列上限（鼠标移动是 latest-wins，满了丢不致命）
+
     def __init__(self, host: str, control_port: int, code: str, udp_port: int,
-                 connect_fn=None, parent=None):
+                 connect_fn=None, parent=None, overlay: bool = True,
+                 overlay_opacity: float = 0.85):
         super().__init__(parent)
         self.host = host
         self.control_port = int(control_port)
         self.code = code
         self.udp_port = int(udp_port)
+        self.overlay = bool(overlay)                    # 跑表 overlay 请求态
+        self.overlay_opacity = max(0.05, min(1.0, float(overlay_opacity)))
         self._connect_fn = connect_fn or (
             lambda hp, timeout: socket.create_connection(hp, timeout=timeout))
         self._stop_evt = threading.Event()
-        self.board_offset_ms: float | None = None   # 板钟-PC钟（video_start 折半 RTT）
+        self._q: queue.Queue = queue.Queue(maxsize=self.QUEUE_MAX)
+        self.board_offset_ms: float | None = None   # 板钟-PC钟（video_start 应答基准）
         self.board_overlay = False                  # 板端跑表 overlay 是否已烙进画面
 
     def request_stop(self):
         self._stop_evt.set()
+
+    def send_command(self, req: dict):
+        """会话期下发一条命令（线程安全；队列满丢弃并报一次）。"""
+        try:
+            self._q.put_nowait(req)
+        except queue.Full:
+            self.report.emit('控制通道命令队列已满（板端响应慢？），本次已丢弃', 'status_warn')
 
     @staticmethod
     def _ask(sock: socket.socket, req: dict, timeout: float = 5.0) -> dict:
@@ -547,8 +654,10 @@ class ControlClient(QtCore.QThread):
                                  'challenge': hello.get('challenge', '')})
                 # video_start 冷启动含板端采集/编码探测（~10s 量级），超时给足
                 t0 = time.time() * 1000
-                resp = self._ask(sock, {'cmd': 'video_start',
-                                        'listen_port': self.udp_port}, timeout=20.0)
+                resp = self._ask(sock, {'cmd': 'video_start', 'listen_port': self.udp_port,
+                                        'overlay': self.overlay,
+                                        'overlay_opacity': self.overlay_opacity},
+                                 timeout=20.0)
                 t1 = time.time() * 1000
                 now_ms = int(resp.get('now_ms') or 0)
                 if now_ms:
@@ -563,7 +672,17 @@ class ControlClient(QtCore.QThread):
                 tip = ('；画面左上角为板端毫秒跑表（实时性定性证明）'
                        if self.board_overlay else '')
                 self.report.emit(f'板端已发流 → {target}{note}{tip}', 'status_ok')
-                self._stop_evt.wait()          # 会话保活：等页面侧停止/关窗
+                # 会话保活循环：取队列命令逐条问答（鼠标注入等）；停止位或哨兵退出
+                while True:
+                    try:
+                        req = self._q.get(timeout=0.2)
+                    except queue.Empty:
+                        if self._stop_evt.is_set():
+                            break
+                        continue
+                    if req is None:
+                        break
+                    self._ask(sock, req, timeout=5.0)
                 try:
                     self._ask(sock, {'cmd': 'video_stop'}, timeout=3.0)
                     self.report.emit('已请求板端停流', 'status_warn')
@@ -620,6 +739,25 @@ class DeviceScreenPage(QtWidgets.QWidget):
         self.spin_port.setToolTip('视频面 UDP 端口（设计 §4，板端发流到本端口）\n'
                                   '包 = [seq u32][ts_ms u32][flags u8][payload NAL]\n'
                                   '开始接收时经控制通道把本端口作为 listen_port 告知板端')
+        # 跑表 overlay 开关与透明度：改动即存设置；正在发流时自动重起流生效
+        self.chk_watch = QtWidgets.QCheckBox('跑表')
+        self.chk_watch.setChecked(read_setting('linux/stopwatch', '1') in ('1', 'true', 'yes'))
+        self.chk_watch.setToolTip('板端把毫秒跑表烙进画面左上角（实时性定性证明）。\n'
+                                  '影响看画面时可关；关闭/开启会重起流（1~2s）')
+        self.spin_op = QtWidgets.QSpinBox()
+        self.spin_op.setRange(10, 100)
+        self.spin_op.setSuffix(' %')
+        self.spin_op.setValue(int(read_setting('linux/stopwatch_op', '85')))
+        self.spin_op.setToolTip('跑表不透明度（10%~100%）；正在发流时改动自动重起流生效')
+        self.chk_watch.toggled.connect(self._on_overlay_changed)
+        self.spin_op.editingFinished.connect(self._on_overlay_changed)
+        # 鼠标控制：开启后控件内点击/移动/滚轮注入板端（绝对坐标，跟手）
+        self.chk_mouse = QtWidgets.QCheckBox('鼠标控制')
+        self.chk_mouse.setChecked(False)
+        self.chk_mouse.setToolTip('开启后鼠标在本画面上的点击/移动/滚轮注入板端'
+                                  '（绝对坐标跟手；画面里的板端光标会跟着走）。\n'
+                                  '需要板端 server_rk 以 root 运行（/dev/uinput）')
+        self.chk_mouse.toggled.connect(self._on_mouse_ctl)
         self.lbl_status = QtWidgets.QLabel('空闲')
         self.lbl_status.setObjectName('status_err')
         self.lbl_status.setToolTip('M2 原型：只读播放；M3 加键鼠交互与延迟 overlay')
@@ -634,6 +772,10 @@ class DeviceScreenPage(QtWidgets.QWidget):
         tool.addWidget(self.edit_code)
         tool.addWidget(QtWidgets.QLabel('UDP 端口'))
         tool.addWidget(self.spin_port)
+        tool.addWidget(self.chk_watch)
+        tool.addWidget(QtWidgets.QLabel('透明度'))
+        tool.addWidget(self.spin_op)
+        tool.addWidget(self.chk_mouse)
         tool.addWidget(self.lbl_status, 1)
 
         # ---- 渲染区 + 统计行 ----
@@ -664,6 +806,7 @@ class DeviceScreenPage(QtWidgets.QWidget):
 
         self._stats_timer = QtCore.QTimer(self)
         self._stats_timer.timeout.connect(self._update_stats)
+        self.gl_widget.inject_cb = self._send_inject
 
         # 主题联动：贴现有页面写法（启动同步一次 + set_theme 通知刷新）
         self.apply_theme()
@@ -712,9 +855,33 @@ class DeviceScreenPage(QtWidgets.QWidget):
             return
         self.control = ControlClient(host, self.spin_control.value(),
                                      self.edit_code.text().strip(),
-                                     self.spin_port.value(), parent=self)
+                                     self.spin_port.value(), parent=self,
+                                     overlay=self.chk_watch.isChecked(),
+                                     overlay_opacity=self.spin_op.value() / 100.0)
         self.control.report.connect(self._set_status)
         self.control.start()
+
+    def _on_overlay_changed(self):
+        """跑表开关/透明度改动：存设置；正在发流则重起流让板端按新参数烙表。"""
+        write_setting('linux/stopwatch', '1' if self.chk_watch.isChecked() else '0')
+        write_setting('linux/stopwatch_op', str(self.spin_op.value()))
+        if self.source is not None:
+            self._set_status('跑表参数变更，重起流中…', 'status_warn')
+            self._stop_pipeline()
+            self._start_pipeline()
+
+    def _on_mouse_ctl(self, on: bool):
+        self.gl_widget.set_mouse_ctl(on)
+        if on and self.control is None:
+            self._set_status('鼠标控制需要控制通道：请填板 IP 并开始接收（自动触发发流）',
+                             'status_warn')
+        elif on:
+            self._set_status('鼠标控制已开启：画面内点击/拖动/滚轮直接注入板端', 'status_ok')
+
+    def _send_inject(self, events: list[dict]):
+        ctl = self.control
+        if ctl is not None:
+            ctl.send_command({'cmd': 'input', 'events': events})
 
     def _stop_pipeline(self):
         self._stats_timer.stop()

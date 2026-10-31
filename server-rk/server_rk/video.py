@@ -59,13 +59,16 @@ _HEADER = struct.Struct(">IIB")         # [seq u32][ts_ms u32][flags u8]，共 9
 # 镜像里跑表以真实速度跳动 = 帧"现在"采的，不是缓存/冻结画面（用户验收口径）。
 # drawtext 依赖 freetype/fontconfig（Debian 官方 ffmpeg 带）；起流前 1 帧真探测，
 # 不可用自动降级为无 overlay（note 里 overlay=off，PC 状态行同步提示）。
-STOPWATCH_VF = ("drawtext=text='%{pts\\:hms}':fontcolor=white@0.85:fontsize=26:"
-                "box=1:boxcolor=black@0.45:boxborderw=6:x=10:y=10")
+# 透明度可调（用户实报常开影响看画面）：fontcolor 与底框按同比例淡化。
+def with_stopwatch(vf: str | None, opacity: float = 0.85) -> str:
+    """采集滤镜链末尾追加跑表 overlay（vf 可为空串；opacity 0.05~1.0）。"""
+    op = max(0.05, min(1.0, float(opacity)))
+    vf_sw = (f"drawtext=text='%{{pts\\:hms}}':fontcolor=white@{op:.2f}:fontsize=26:"
+             f"box=1:boxcolor=black@{op * 0.53:.2f}:boxborderw=6:x=10:y=10")
+    return f"{vf},{vf_sw}" if vf else vf_sw
 
 
-def with_stopwatch(vf: str | None) -> str:
-    """采集滤镜链末尾追加跑表 overlay（vf 可为空串）。"""
-    return f"{vf},{STOPWATCH_VF}" if vf else STOPWATCH_VF
+STOPWATCH_VF = with_stopwatch(None)   # 缺省透明度常量（兼容旧引用/测试）
 
 
 def find_ffmpeg():
@@ -244,7 +247,8 @@ class FFmpegVideoSource:
         return args
 
     def start(self, resolution=None, fps: int = DEFAULT_FPS,
-              bitrate: str = DEFAULT_BITRATE, udp_target: str | None = None):
+              bitrate: str = DEFAULT_BITRATE, udp_target: str | None = None,
+              overlay: bool = True, overlay_opacity: float = 0.85):
         """起 ffmpeg 子进程。返回 (ok, 说明)；不可用/已在运行时明确报错。"""
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
@@ -261,31 +265,37 @@ class FFmpegVideoSource:
                     self._pipeline = self._pipeline_picker(self.ffmpeg_path)
                 except RuntimeError as exc:
                     return False, str(exc)
-            # 跑表 overlay 每次起流前探测一次（失败自动降级为无 overlay，不阻塞发流）。
-            # 补丁必须幂等：缓存管线跨 start 复用，重复追加 drawtext/nobuffer 会让
-            # 滤镜链层层叠加（真板实测 3 层 drawtext 直接把传输时延顶到 ~1s）
-            self._overlay = self._overlay_probe(self.ffmpeg_path, self._pipeline)
-            vf = self._pipeline.get("vf")
-            if self._overlay and STOPWATCH_VF not in (vf or ""):
-                self._pipeline = {**self._pipeline, "vf": with_stopwatch(vf)}
             if self._codec == SOFT_CODEC:
                 # 软编兜底的实时性钳制：fps 超软编算力往回收——超出只会积压延迟；
                 # 分辨率跟随采集源原生气（镜像桌面无需放大到 720p）
                 fps = min(int(fps or DEFAULT_FPS), SOFT_CODEC_MAX_FPS)
+            # 每次起流从"纯净基线"重新打补丁（幂等的结构性保证：基线 dict 永不改写，
+            # 旧实现把补丁写回缓存导致 drawtext/nobuffer 跨 start 层层叠加）
+            base = self._pipeline
             # 实时性：采集帧率对齐输出帧率 + 输入侧禁缓冲。30fps 进 12fps 出会
             # 在滤镜/编码队列里积 ~1s 滞后（真机实测传输时延 1121ms → 对齐后大幅回落）
-            input_args = list(self._pipeline["input_args"])
+            input_args = list(base["input_args"])
             if "-framerate" in input_args:
                 input_args[input_args.index("-framerate") + 1] = str(fps)
             if "-fflags" not in input_args:
                 input_args = ["-fflags", "nobuffer", *input_args]
-            self._pipeline = {**self._pipeline, "input_args": input_args}
+            vf = base.get("vf")
+            # 跑表 overlay：按本次请求的开关/透明度打补丁，起流前 1 帧真探测
+            #（失败自动降级为无 overlay，不阻塞发流）
+            self._overlay = False
+            if overlay:
+                eff_vf = with_stopwatch(vf, overlay_opacity)
+                if self._overlay_probe(self.ffmpeg_path, {**base, "vf": eff_vf}):
+                    self._overlay = True
+                    vf = eff_vf
+            self._pipeline_eff = {**base, "input_args": input_args, "vf": vf}
             args = self.build_args(resolution=resolution, fps=fps, bitrate=bitrate,
-                                   udp_target=udp_target)
+                                   udp_target=udp_target, pipeline=self._pipeline_eff)
             log.info("启动 ffmpeg: %s", " ".join(args))
             # stdin 保持打开：kmsgrab 的 '-' 只是占位输入（数据走 DRM API），进程不读 stdin，
             # 但管道被关闭会触发 EOF 行为；stderr 丢弃（M2 骨架不做诊断采集）
             env = {**os.environ, **self._pipeline["extra_env"]}
+            self.last_env = env        # 采集会话环境（DISPLAY/XAUTHORITY），鼠标注入 X 指针同源
             self._proc = self._popen(args, stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                      env=env)

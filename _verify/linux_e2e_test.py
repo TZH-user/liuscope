@@ -163,6 +163,17 @@ def main() -> int:
         return '重复启动被拒'
     r.case('T2.7 重复 video_start 拒绝', t_dup_start)
 
+    def t_mouse_inject():
+        # 真机 uinput（raw ioctl, root）：绝对移动 + 左键按下抬起 → 全部 applied
+        resp = cli.ask({'cmd': 'input', 'events': [
+            {'t': 'mouse_abs', 'x': 512, 'y': 300},
+            {'t': 'mouse_button', 'btn': 'left', 'down': True},
+            {'t': 'mouse_button', 'btn': 'left', 'down': False},
+        ]})
+        assert resp.get('ok') and resp.get('applied') == 3 and resp.get('skipped') == 0, resp
+        return f"uinput 注入 applied={resp.get('applied')}（绝对移动+左键）"
+    r.case('T2.7b 鼠标注入（uinput 真机）', t_mouse_inject)
+
     def t_stop_and_reap():
         resp = cli.ask({'cmd': 'video_stop'}, timeout=6.0)
         assert resp.get('ok'), resp
@@ -170,6 +181,15 @@ def main() -> int:
         assert not st['video'].get('running'), f'stop 后仍在跑: {st["video"]}'
         return 'ffmpeg 已回收（status.running=false）'
     r.case('T2.8 video_stop 与进程回收', t_stop_and_reap)
+
+    def t_overlay_off():
+        # 跑表可关（用户实报常开影响看画面）：请求 overlay=False → note overlay=off
+        resp = cli.ask({'cmd': 'video_start', 'listen_port': udp_port,
+                        'overlay': False}, timeout=20.0)
+        assert resp.get('ok') and 'overlay=off' in resp.get('note', ''), resp
+        cli.ask({'cmd': 'video_stop'}, timeout=6.0)
+        return 'overlay=False 生效（画面无跑表）'
+    r.case('T2.8b overlay 关闭生效', t_overlay_off)
 
     def t_close():
         resp = cli.ask({'cmd': 'close'})

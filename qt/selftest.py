@@ -3182,6 +3182,9 @@ def test_device_screen_control():
             elif cmd == 'video_stop':
                 conn.sendall(b'{"ok": true, "stopped": true}\n')
                 break
+            elif cmd == 'input':
+                resp = {'ok': True, 'applied': len(req.get('events') or []),
+                        'skipped': 0}
             else:
                 resp = {'ok': False, 'error': f'未知命令 {cmd}'}
             conn.sendall((_json.dumps(resp, ensure_ascii=False) + '\n').encode('utf-8'))
@@ -3209,6 +3212,9 @@ def test_device_screen_control():
     assert cmds[:3] == ['hello', 'pair', 'video_start'], cmds
     assert recv_lines[1].get('challenge') == 'CH7', 'pair 必须回显 hello 的 challenge'
     assert recv_lines[2].get('listen_port') == 9300, '收流端口必须透传给板端'
+    assert recv_lines[2].get('overlay') is True and \
+        abs(recv_lines[2].get('overlay_opacity', 0) - 0.85) < 1e-6, \
+        '跑表开关/透明度必须随 video_start 下发'
     # 实时性证明链：应答 now_ms → 以收到时刻为基准估板钟差；overlay 上报 → 状态行提示跑表
     assert client.board_overlay is True, 'overlay 上报必须透传'
     assert client.board_offset_ms is not None, 'now_ms 必须折算出板钟差'
@@ -3224,6 +3230,18 @@ def test_device_screen_control():
     # u32 回绕：发包在 2^32 边界前 16ms，收包在边界后 9ms（延迟 25ms）
     assert abs(transport_delay_ms(0xFFFFFFF0, (1 << 32) + 9, 0.0) - 25) < 5, \
         '回绕差值应按有符号解读'
+    # 会话期命令下发（鼠标注入通道）：input 命令经队列到板端并收到 applied
+    client.send_command({'cmd': 'input',
+                         'events': [{'t': 'mouse_abs', 'x': 512, 'y': 300},
+                                    {'t': 'mouse_button', 'btn': 'left', 'down': True}]})
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        app.processEvents()
+        if any(r.get('cmd') == 'input' for r in recv_lines):
+            break
+        time.sleep(0.02)
+    in_req = next(r for r in recv_lines if r.get('cmd') == 'input')
+    assert in_req['events'][0] == {'t': 'mouse_abs', 'x': 512, 'y': 300}, in_req
 
     # 停止：同连接发 video_stop 后线程自然退出
     client.request_stop()
