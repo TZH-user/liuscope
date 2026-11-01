@@ -148,6 +148,7 @@ void fault_dump_report(uint32_t t, uint32_t sp)
  */
 __attribute__((naked)) void HardFault_Handler(void)
 {
+#ifdef FAULT_DUMP_V7
   __asm volatile (
     "tst lr, #4          \n" /* EXC_RETURN bit2: 0=MSP, 1=PSP */
     "ite eq              \n"
@@ -156,6 +157,22 @@ __attribute__((naked)) void HardFault_Handler(void)
     "mov r0, #0          \n" /* T=HardFault */
     "b fault_dump_report \n"
   );
+#else
+  /* ARMv6-M（Thumb-1）：无 IT 块、TST 只收低寄存器——LR 先落低寄存器再测 */
+  __asm volatile (
+    "movs r0, #0         \n" /* T=HardFault（r0=压栈 R0 不可信，必须显式清零） */
+    "mov r2, lr          \n" /* Hi 寄存器 MOV 允许（Thumb-1 格式 5） */
+    "movs r3, #4         \n"
+    "tst r2, r3          \n" /* Z=1 ⇔ EXC_RETURN bit2=0 → MSP */
+    "bne 1f              \n"
+    "mrs r1, msp         \n"
+    "b 2f                \n"
+    "1:                  \n"
+    "mrs r1, psp         \n"
+    "2:                  \n"
+    "b fault_dump_report \n"
+  );
+#endif
 }
 
 #ifdef FAULT_DUMP_V7
