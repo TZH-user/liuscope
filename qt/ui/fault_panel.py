@@ -13,8 +13,11 @@ wordWrap 换行、列宽 Interactive 不被内容顶宽、历史列表窄栏（Q
 """
 from __future__ import annotations
 
+import os
+
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from core import fault_pack_doc
 from core.fault_report import (BFSR_BITS, HFSR_BITS, MMFSR_BITS, UFSR_BITS,
                                FaultInfo, describe_address, fmt_addr,
                                load_elf_symbols, parse_fault_line, symbolize)
@@ -49,6 +52,12 @@ class FaultPanel(QtWidgets.QWidget):
         self.edit_elf.setToolTip('带符号表的 .elf（Keil 为 .axf）。留空只显示裸地址。')
         self.btn_elf_browse = QtWidgets.QPushButton('浏览…')
         self.btn_elf_browse.setObjectName('tool')
+        self.btn_guide = QtWidgets.QPushButton('适配指南')
+        self.btn_guide.setObjectName('tool')
+        self.btn_guide.setToolTip('!FAULT 固件接入教程（仓库 docs/fault_pack/，冻结版内嵌全文可复制）')
+        self.btn_copy_howto = QtWidgets.QPushButton('复制接入代码')
+        self.btn_copy_howto.setObjectName('tool')
+        self.btn_copy_howto.setToolTip('复制契约行+三步接入+HAL 输出函数示例到剪贴板')
         self.lbl_elf_state = QtWidgets.QLabel('')
         self.lbl_elf_state.setObjectName('backlog')
 
@@ -56,6 +65,8 @@ class FaultPanel(QtWidgets.QWidget):
         elf_row.addWidget(QtWidgets.QLabel('ELF'))
         elf_row.addWidget(self.edit_elf, 1)
         elf_row.addWidget(self.btn_elf_browse)
+        elf_row.addWidget(self.btn_guide)
+        elf_row.addWidget(self.btn_copy_howto)
 
         # ---- 左：历史列表（窄栏，splitter 可拖）----
         self.list_hist = QtWidgets.QListWidget()
@@ -102,6 +113,8 @@ class FaultPanel(QtWidgets.QWidget):
         self.list_hist.currentRowChanged.connect(self._on_hist_selected)
         self.btn_clear.clicked.connect(self.clear_all)
         self.btn_elf_browse.clicked.connect(self._browse_elf)
+        self.btn_guide.clicked.connect(self._open_guide)
+        self.btn_copy_howto.clicked.connect(self._copy_howto)
         self.edit_elf.editingFinished.connect(lambda: self.set_elf_path(self.edit_elf.text()))
         self._apply_elf()
 
@@ -261,6 +274,54 @@ class FaultPanel(QtWidgets.QWidget):
             '固件 ELF (*.elf *.axf *.out);;所有文件 (*.*)')
         if path:
             self.set_elf_path(path)
+
+    # ---------- 接入教程（一键打开/复制，用户反馈：教程要能在 STM32 相关页直达） ----------
+
+    def _open_guide(self):
+        """弹教程窗口（磁盘正本优先，冻结版内嵌副本兜底），窗口内可复制全文/打开文件。"""
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle('!FAULT 固件接入适配指南（STM32 → 故障诊断）')
+        dlg.resize(760, 560)
+        v = QtWidgets.QVBoxLayout(dlg)
+        txt = QtWidgets.QPlainTextEdit()
+        txt.setReadOnly(True)
+        txt.setPlainText(fault_pack_doc.guide_text())
+        txt.setObjectName('log_view')  # 复用日志区等宽+折行样式，markdown 代码块不跑偏
+        v.addWidget(txt, 1)
+        row = QtWidgets.QHBoxLayout()
+        disk = fault_pack_doc.disk_path()
+        btn_open = QtWidgets.QPushButton('打开磁盘文件（docs/fault_pack/）')
+        btn_open.setObjectName('tool')
+        if not os.path.exists(disk):
+            btn_open.setEnabled(False)
+            btn_open.setToolTip('冻结版未随附 docs/——全文已在上方，可直接复制')
+        row.addWidget(btn_open)
+        row.addStretch(1)
+        btn_copy = QtWidgets.QPushButton('复制全文')
+        row.addWidget(btn_copy)
+        btn_close = QtWidgets.QPushButton('关闭')
+        btn_close.setObjectName('tool')
+        row.addWidget(btn_close)
+        v.addLayout(row)
+        btn_copy.clicked.connect(lambda: QtWidgets.QApplication.clipboard()
+                                 .setText(txt.toPlainText()))
+        btn_open.clicked.connect(self._open_guide_file)
+        btn_close.clicked.connect(dlg.accept)
+        dlg.exec()
+
+    def _open_guide_file(self):
+        path = fault_pack_doc.disk_path()
+        try:
+            os.startfile(path)  # noqa: S606 (Windows 默认编辑器打开 md)
+        except (OSError, AttributeError):
+            QtWidgets.QApplication.clipboard().setText(fault_pack_doc.guide_text())
+
+    def _copy_howto(self):
+        QtWidgets.QApplication.clipboard().setText(fault_pack_doc.COPY_SNIPPET)
+        self.btn_copy_howto.setText('已复制 ✓')
+        self.btn_copy_howto.setEnabled(False)
+        QtCore.QTimer.singleShot(1500, lambda: (self.btn_copy_howto.setText('复制接入代码'),
+                                                self.btn_copy_howto.setEnabled(True)))
 
     def _apply_elf(self):
         self._syms, self._elf_err = load_elf_symbols(self.edit_elf.text())

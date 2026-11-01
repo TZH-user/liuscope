@@ -210,6 +210,21 @@ class SpectrumPanel(QtWidgets.QWidget):
         # 主题联动：按当前主题同步一次（启动即浅色的场景），此后随 set_theme 通知刷新
         self.apply_theme()
         theme.register_listener(self.apply_theme)
+        self._align_left_axes()  # 两图左轴等宽 → 频率轴左右边界与幅度图对齐
+
+    def _align_left_axes(self):
+        """瀑布与幅度图绘图区左右边界对齐（用户反馈）。
+
+        两图左轴内容不同（上=「幅度 (dB)」竖排标签+负号刻度，下=短刻度），
+        自然宽度不等 → 绘图区左右边界错位。按当前应用字体度量一个统一宽度
+        （刻度文本宽度 与 竖排标签高度 取大者，再加边距）同时固定到两轴，
+        主题/字体变化时随 apply_theme 重算。
+        """
+        fm = QtGui.QFontMetrics(QtWidgets.QApplication.instance().font())
+        w = (max(fm.horizontalAdvance('-100'), fm.horizontalAdvance('1.00'))
+             + fm.height() + 24)  # 刻度文本 + 竖排轴标签高度 + 边距
+        self.plot.getAxis('left').setWidth(w)
+        self.wf_plot.getAxis('left').setWidth(w)
 
     # ---------- 主题联动 ----------
 
@@ -225,6 +240,7 @@ class SpectrumPanel(QtWidgets.QWidget):
         self._marker_line.setPen(pg.mkPen(p['sp_marker'], width=1,
                                           style=QtCore.Qt.PenStyle.DashLine))
         self._marker_text.setColor(p['text'])
+        self._align_left_axes()  # 字体随主题/QSS 可能变化，等宽重算保边界对齐
 
     # ---------- 分析（对齐主线 get_spectrum_analysis） ----------
 

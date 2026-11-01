@@ -717,6 +717,19 @@ def test_fault_panel():
         sys_texts = ' '.join(e['text'] for e in win.message_entries
                              if e['direction'] == 'SYS')
         assert 'HardFault 解码' in sys_texts       # fault_decode 钩子保持
+        # 故障诊断并入 STM32 页（两层页签，不设独立顶层页签）+ 徽标两层跳转
+        sub = [win.stm32_tabs.tabText(i) for i in range(win.stm32_tabs.count())]
+        assert sub == ['烧录', '故障诊断'], sub
+        assert all(win.tabs.tabText(i) != '故障诊断' for i in range(win.tabs.count()))
+        win.btn_fault_badge.click()
+        assert (win.tabs.currentWidget() is win.stm32_tabs
+                and win.stm32_tabs.currentWidget() is win.fault), '徽标须两层跳转'
+        # 接入教程一键复制 + 内嵌副本与契约同步（防重新生成遗漏）
+        from core import fault_pack_doc
+        assert '!FAULT T=' in fault_pack_doc.GUIDE_TEXT
+        win.fault._copy_howto()
+        cb = QtWidgets.QApplication.clipboard().text()
+        assert 'fault_dump_set_output' in cb and 'fault_dump_init' in cb
         win._port_watch_timer.stop()
         win.close()
     finally:
@@ -1834,6 +1847,11 @@ def test_spectrum_panel():
     win.show()
     panel = win.spectrum
 
+    # 瀑布与幅度图绘图区左右边界对齐（用户反馈）：两图左轴必须等宽
+    aw1 = panel.plot.getAxis('left').width()
+    aw2 = panel.wf_plot.getAxis('left').width()
+    assert aw1 == aw2 and aw1 > 0, f'两图左轴不等宽: {aw1} vs {aw2}'
+
     # 喂 FireWater 单通道 50Hz 正弦（fs=1000 → 帧率 1000/秒，模拟数据 20ms/帧太慢，直接喂数据）
     phase = 0.0
     for _ in range(600):
@@ -2945,7 +2963,7 @@ sys.exit(0)
     try:
         app.processEvents()
         titles = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-        assert titles == ['终端', '波形', '频谱', 'Modbus', 'STM32', '故障诊断', 'Linux 支持', '设置', '关于'], \
+        assert titles == ['终端', '波形', '频谱', 'Modbus', 'STM32', 'Linux 支持', '设置', '关于'], \
             str(titles)
         panel = win.stm32
         assert panel.runner.cli_path == fake_bat, panel.runner.cli_path
@@ -3103,7 +3121,7 @@ def test_main_tabs_integration():
     try:
         app.processEvents()
         texts = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-        assert texts == ['终端', '波形', '频谱', 'Modbus', 'STM32', '故障诊断', 'Linux 支持', '设置', '关于'], \
+        assert texts == ['终端', '波形', '频谱', 'Modbus', 'STM32', 'Linux 支持', '设置', '关于'], \
             str(texts)
         for i, name in enumerate(texts):   # 逐页签切换 + 渲染非空
             win.tabs.setCurrentIndex(i)
@@ -3129,6 +3147,10 @@ def test_main_tabs_integration():
         win.wave.btn_xy.setChecked(False)
         win.wave.btn_sim.setChecked(False)
         app.processEvents()
+        if not win._control_channel.listening:  # 9101 被外部进程占用时兜底临时端口
+            win._control_channel.stop()
+            win._control_channel._port = 0
+            assert win._control_channel.start()
         assert win._control_channel.listening, 'AI 控制通道应随主窗默认开启'
         status = win._control_api.status()
         assert status.get('protocol') == 'FireWater' and status.get('channels', 0) >= 3
@@ -3478,11 +3500,11 @@ def test_theme_custom_and_pages():
         # ---- 页面显隐：设置页开关 ↔ 页签可见性 + ini 记忆 ----
         win.settings_page.chk_show_stm32.setChecked(False)
         win.settings_page.chk_show_screen.setChecked(False)
-        assert not win.tabs.isTabVisible(win.tabs.indexOf(win.stm32)), 'STM32 页应隐藏'
+        assert not win.tabs.isTabVisible(win.tabs.indexOf(win.stm32_tabs)), 'STM32 页应隐藏'
         assert not win.tabs.isTabVisible(win.tabs.indexOf(win.device_screen)),             'Linux 支持页应隐藏'
         assert read_setting(SHOW_STM32_KEY, '') == '0', '显隐应写设置记忆'
         win.settings_page.chk_show_stm32.setChecked(True)
-        assert win.tabs.isTabVisible(win.tabs.indexOf(win.stm32)), '重新勾选应恢复显示'
+        assert win.tabs.isTabVisible(win.tabs.indexOf(win.stm32_tabs)), '重新勾选应恢复显示'
 
         # ---- 自定义主题 ----
         idx = combo.findData('custom')

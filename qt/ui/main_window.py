@@ -249,7 +249,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_fault_badge.setObjectName('fault_badge')
         self.btn_fault_badge.setToolTip('固件打出了 !FAULT 异常行——点击查看寄存器位域详情')
         self.btn_fault_badge.clicked.connect(
-            lambda: self.tabs.setCurrentWidget(self.fault))
+            lambda: (self.tabs.setCurrentWidget(self.stm32_tabs),
+                     self.stm32_tabs.setCurrentWidget(self.fault)))
         self.btn_fault_badge.hide()
         # 小宽度上限：正常文本（类型+时刻）够用；极端长文本被裁但 tooltip 有全文，
         # 不至于把同行的连接状态（ElidedLabel）与串口选择器挤没（layout_audit 实测）
@@ -466,8 +467,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.wave, '波形')
         self.tabs.addTab(self.spectrum, '频谱')
         self.tabs.addTab(self.modbus, 'Modbus')
-        self.tabs.addTab(self.stm32, 'STM32')
-        self.tabs.addTab(self.fault, '故障诊断')
+        # 故障诊断并入 STM32 页（属 STM32 的功能，独立顶层页签易误会为通用功能）
+        self.stm32_tabs = QtWidgets.QTabWidget()
+        self.stm32_tabs.addTab(self.stm32, '烧录')
+        self.stm32_tabs.addTab(self.fault, '故障诊断')
+        self.tabs.addTab(self.stm32_tabs, 'STM32')
         self.tabs.addTab(self.device_screen, 'Linux 支持')
         self.tabs.addTab(self.settings_page, '设置')
         self.tabs.addTab(self.about_page, '关于')
@@ -537,7 +541,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_page_visibility(self):
         """按设置页开关显隐可选页签（STM32 / Linux 支持），隐藏页对象保留不销毁。"""
-        vis = ((self.stm32, self.settings_page.chk_show_stm32.isChecked()),
+        vis = ((self.stm32_tabs, self.settings_page.chk_show_stm32.isChecked()),
                (self.device_screen, self.settings_page.chk_show_screen.isChecked()))
         for page, shown in vis:
             idx = self.tabs.indexOf(page)
@@ -1267,7 +1271,7 @@ class MainWindow(QtWidgets.QMainWindow):
         stamp = datetime.datetime.now().strftime('%H:%M:%S')
         text = f'⚠ {info.fault_type} {stamp}'
         self.btn_fault_badge.setText(text)
-        self.btn_fault_badge.setToolTip(text + '\n点击切换到「故障诊断」页查看寄存器位域详情')
+        self.btn_fault_badge.setToolTip(text + '\n点击切换到「STM32 → 故障诊断」查看寄存器位域详情')
         self.btn_fault_badge.show()
 
     def closeEvent(self, event):  # noqa: N802 (Qt 命名)

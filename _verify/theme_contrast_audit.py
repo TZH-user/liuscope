@@ -278,7 +278,7 @@ def audit_pixels(app, win) -> None:
             violations.append(f'[{tag}] 像素 {desc} 无文字墨色')
             print(f'违规  无墨色    [{tag}] 像素 {desc}')
     # 设置页禁用按钮（CLI 路径为空时「恢复自动探测」置灰）
-    win.tabs.setCurrentIndex(5)
+    win.tabs.setCurrentWidget(win.settings_page)
     app.processEvents()
     btn = win.settings_page.btn_cli_reset
     if not btn.isEnabled():
@@ -333,7 +333,14 @@ def main() -> int:
         for i, tab_name in enumerate(texts):
             win.tabs.setCurrentIndex(i)
             app.processEvents()
-            audit_page_widgets(win.tabs.widget(i), theme.palette(), f'{tag}·{tab_name}')
+            page = win.tabs.widget(i)
+            audit_page_widgets(page, theme.palette(), f'{tag}·{tab_name}')
+            if isinstance(page, QtWidgets.QTabWidget):   # STM32 容器页：逐子页扫（烧录/故障诊断）
+                for j in range(page.count()):
+                    page.setCurrentIndex(j)
+                    app.processEvents()
+                    audit_page_widgets(page.widget(j), theme.palette(),
+                                       f'{tag}·{tab_name}·{page.tabText(j)}')
 
         audit_pixels(app, win)
 

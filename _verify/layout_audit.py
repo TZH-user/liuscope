@@ -123,18 +123,26 @@ def main(phase: str) -> int:
         evidence = os.path.join(ROOT, '_verify', 'evidence')
         os.makedirs(evidence, exist_ok=True)
         issues: list[str] = []
-        pages = [win.tabs.widget(i) for i in range(win.tabs.count())]
-        names = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-        # 逐页截图（页签切换让目标页真正布局）
-        for page, name in zip(pages, names):
-            win.tabs.setCurrentWidget(page)
+        # 逐页截图（页签切换让目标页真正布局）；容器页签（STM32）展开到子页
+        jobs: list[tuple[str, QtWidgets.QWidget, QtWidgets.QWidget | None]] = []
+        for i in range(win.tabs.count()):
+            top, tname = win.tabs.widget(i), win.tabs.tabText(i)
+            if isinstance(top, QtWidgets.QTabWidget):
+                for j in range(top.count()):
+                    jobs.append((f'{tname}·{top.tabText(j)}', top, top.widget(j)))
+            else:
+                jobs.append((tname, top, None))
+        for name, top, sub in jobs:
+            win.tabs.setCurrentWidget(top)
+            if sub is not None:
+                top.setCurrentWidget(sub)
             for _ in range(6):
                 app.processEvents()
             pix = win.grab()
             path = os.path.join(evidence, f'layout_audit_{phase}_{name}.png')
             pix.save(path)
-            audit_widget(page, name, issues)
-        print(f'--- phase={phase} 页面截图 x{len(names)} → {evidence}')
+            audit_widget(sub if sub is not None else top, name, issues)
+        print(f'--- phase={phase} 页面截图 x{len(jobs)} → {evidence}')
         if issues:
             print(f'--- 溢出嫌疑 {len(issues)} 处:')
             for it in issues:
