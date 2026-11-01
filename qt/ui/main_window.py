@@ -1305,9 +1305,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _finalize_close(self):
         """重收尾（closeEvent 下一拍执行）：窗口已隐藏，用户不再感知等待。"""
-        if getattr(self, '_finalized', False):
+        if getattr(self, '_finalizing', False):
             return
-        self._finalized = True
+        self._finalizing = True
         try:
             self.recorder.stop()
             self._control_channel.stop()
@@ -1318,6 +1318,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._stop_file_send('窗口关闭')
             self._teardown_worker()
         finally:
+            # 完成标志必须在收尾真正跑完后置位（重入护栏用 _finalizing）——
+            # 否则等待方（close 两段式自测/外部）看到"已完成"时重活还在同线程
+            # 继续跑，漏进下一拍事件里毒化无关热路径（实测漏进下一测试的洪泛
+            # ingest 计时窗，worst 500ms 超阈值）。
+            self._finalized = True
             # 收尾自身出异常也要照常退出（窗口已经关了，留着无窗进程没意义）
             app = QtWidgets.QApplication.instance()
             if not getattr(self, '_quit_on_last_saved', True):

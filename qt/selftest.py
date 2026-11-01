@@ -3641,6 +3641,14 @@ def run_selftest(frozen: bool = False, only: str | None = None) -> int:
         except BaseException as exc:
             _trace(f'{fn.__name__}: RAISED {type(exc).__name__}: {exc}')
             raise
+        # 组间排水：前组遗留的延迟任务（singleShot 收尾等）在本拍耗尽，不漏进
+        # 下一组的计时窗（close 两段式 finalize 漏进洪泛 ingest 计时的实测教训）
+        from PySide6 import QtWidgets as _QW
+        _app = _QW.QApplication.instance()
+        if _app is not None:
+            for _ in range(10):
+                _app.processEvents()
+                time.sleep(0.01)
     _trace('QT_SPIKE_SELFTEST_OK')
     print('QT_SPIKE_SELFTEST_OK')
     return 0
