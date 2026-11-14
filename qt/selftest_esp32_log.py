@@ -75,7 +75,7 @@ def test_idf_log_ui():
     try:
         win = mw.MainWindow()
         win._port_watch_timer.stop()
-        assert win.chk_idf.isChecked(), 'IDF 解析默认开'
+        assert win.settings_page.chk_idf.isChecked(), 'IDF 解析默认开'
         assert not win.btn_backtrace.isEnabled(), '无地址时解析按钮置灰'
 
         # 复位横幅 → 装饰行(含原因) + 清空收集器
@@ -109,7 +109,7 @@ def test_idf_log_ui():
         assert win._esp32_log_style('hello world')[0] == theme.color('rx')
 
         # 开关关闭 → 不再插装饰行、不收集(旁路在 _append_log 层)
-        win.chk_idf.setChecked(False)
+        win.settings_page.chk_idf.setChecked(False)
         n1 = len(win.message_entries)
         win._append_log('RX', 'rst:0x3 (SW_RESET)')
         assert len(win.message_entries) == n1 + 1, '关闭解析后只应有 RX 行本身'
@@ -118,7 +118,7 @@ def test_idf_log_ui():
             '关闭解析不收集地址、按钮保持置灰'
 
         # 清空记录联动收集器
-        win.chk_idf.setChecked(True)
+        win.settings_page.chk_idf.setChecked(True)
         win._append_log('RX', 'backtrace:0x400814ad:0x3ffb5e50')
         win.clear_log()
         assert win._esp32_bt == [] and not win.btn_backtrace.isEnabled()

@@ -402,13 +402,13 @@ def test_auto_log_export():
         win.show()
         win.wave.state.enabled = False
         win.combo_rx_format.setCurrentText('ASCII')
-        win.chk_auto_save.setChecked(True)
+        win.settings_page.chk_auto_save.setChecked(True)
         before = os.listdir(tmp_dir)
         win.ingest_bytes(b'log-me\n')          # RX 入队
         win._append_log('SYS', 'sys-note')      # SYS 不入队
         assert win._auto_log.pending_count() == 1, 'SYS 不该进自动日志'
         win.on_flush_tick()                     # 落盘 + 标签更新
-        assert '日志: ' in win.lbl_log_path.text()
+        assert '自动保存: ' in win.lbl_log_path.text(), '路径标签须说明自动保存口径'
         after = os.listdir(tmp_dir)
         assert len(after) == len(before) + 1
         latest = max(os.path.join(tmp_dir, n) for n in after)
@@ -416,7 +416,7 @@ def test_auto_log_export():
             assert 'log-me' in f.read()
 
         # 勾选关闭：积压直接丢，不落盘
-        win.chk_auto_save.setChecked(False)
+        win.settings_page.chk_auto_save.setChecked(False)
         win.ingest_bytes(b'dropped\n')
         win._flush_auto_log()
         assert win._auto_log.pending_count() == 0
@@ -2043,7 +2043,7 @@ def test_tx_alignment_and_hover():
     win.show()
     win.wave.state.enabled = False
     win._port_watch_timer.stop()
-    win.chk_auto_save.setChecked(False)  # 像素检查阶段不掺自动日志节拍
+    win.settings_page.chk_auto_save.setChecked(False)  # 像素检查阶段不掺自动日志节拍
     theme.set_theme('dark')              # 统一深色基线（像素断言按深色日志底扫描）
     app.processEvents()
     try:
@@ -2152,7 +2152,7 @@ def test_tx_alignment_and_hover():
             win.log.viewport(), QtCore.QEvent(QtCore.QEvent.Type.Leave))
         assert hover._last_block == -1 and not hover._timer.isActive(), '离场应复位悬停状态'
     finally:
-        win.chk_auto_save.setChecked(True)
+        win.settings_page.chk_auto_save.setChecked(True)
         win._port_watch_timer.stop()
         win.close()
     print('TX ALIGN + HOVER OK')
@@ -2602,7 +2602,7 @@ def test_theme_contrast():
             win = mw.MainWindow()
             win.show()
             win._port_watch_timer.stop()
-            win.chk_auto_save.setChecked(False)
+            win.settings_page.chk_auto_save.setChecked(False)
             win.wave.state.enabled = False
             assert theme.current_theme() == name, '建窗后必须是目标主题'
             p = theme.palette()
@@ -3522,6 +3522,19 @@ def test_theme_custom_and_pages():
         win._apply_on_top(False)
         assert (win.windowFlags() & _need) == _need and win.isVisible(), \
             f'置顶OFF 剥位或窗口隐身: {hex(int(win.windowFlags()))}'
+
+        # ---- 日志三开关已迁设置页「日志」区 + 路径标签省略不撑宽（用户反馈） ----
+        sp = win.settings_page
+        assert sp.chk_auto_save.isChecked() and sp.chk_idf.isChecked() \
+            and sp.chk_ansi.isChecked(), '三开关默认状态：自动保存/IDF 解析/ANSI 渲染全开'
+        from ui.main_window import ElidedLabel as _EL  # noqa: PLC0415
+        assert isinstance(win.lbl_log_path, _EL), '路径标签须为 ElidedLabel（悬停全文、Ignored 不撑宽）'
+        long_path = 'F:\\很长很长的目录\\' + 'x' * 160 + '\\serial_auto_log_20261114.txt'
+        win.lbl_log_path.setText(f'自动保存: {long_path}')
+        for _ in range(6):
+            app.processEvents()
+        assert win.lbl_log_path.toolTip() == f'自动保存: {long_path}', '悬停须显示全文'
+        assert win.lbl_log_path.text() == f'自动保存: {long_path}', 'text() 口径返回全文（不受省略影响）'
 
         # ---- 自定义主题 ----
         idx = combo.findData('custom')

@@ -124,6 +124,27 @@ class SettingsPage(QtWidgets.QWidget):
             '与错误关键词同时命中按错误级处理')
         self.edit_kw_watch.editingFinished.connect(lambda: write_setting(
             'log/kw_watch', self.edit_kw_watch.text().strip()))
+        # ---- 日志显示/保存三开关（自终端页工具行迁入：顶行太挤且路径标签曾撑宽窗口）----
+        self.chk_auto_save = QtWidgets.QCheckBox('自动保存日志')
+        self.chk_auto_save.setChecked(True)      # 会话级开关（沿用历史默认开，不落盘）
+        self.chk_auto_save.setToolTip(
+            '收发的每条日志实时追加到 logs/serial_auto_log_*.txt（SYS 除外）\n'
+            '实际目录见终端页「自动保存: …」标签（悬停显示完整路径）')
+        self.chk_idf = QtWidgets.QCheckBox('ESP-IDF 日志解析')
+        self.chk_idf.setChecked(read_setting('log/esp_idf_parse', '1') != '0')
+        self.chk_idf.setToolTip(
+            '识别 ESP-IDF 日志（等级着色）、复位横幅（rst:0x…）与 Guru Meditation 崩溃，\n'
+            '并收集 backtrace 地址供「解析 backtrace」翻译成源码位置')
+        self.chk_idf.toggled.connect(lambda on: write_setting('log/esp_idf_parse', '1' if on else '0'))
+        self.chk_ansi = QtWidgets.QCheckBox('ANSI 渲染')
+        self.chk_ansi.setChecked(read_setting('log/ansi_render', '1') != '0')
+        self.chk_ansi.setToolTip(
+            '渲染串口回传里的 ANSI 转义序列：SGR 颜色（16/256 色/真彩）按设备指定着色，\n'
+            '粗体/斜体/下划线/反显生效；空格保排版，框线图与 ASCII 艺术字不塌陷。\n'
+            '光标移动/清屏等对滚动日志无意义的序列自动剥除；对比度过低的颜色自动混合保底。\n'
+            '对不含转义码的行零影响；HEX 显示模式不走本渲染，二进制协议建议用 HEX 查看。\n'
+            '原文条目与自动保存日志不受影响，始终记录原始字节解码结果')
+        self.chk_ansi.toggled.connect(lambda on: write_setting('log/ansi_render', '1' if on else '0'))
         self.chk_copy_on_select = QtWidgets.QCheckBox('选中日志即复制（PuTTY 风格）')
         self.chk_copy_on_select.setToolTip(
             '鼠标选中的日志文本立即进剪贴板（拖选过程持续同步）；默认关')
@@ -198,6 +219,9 @@ class SettingsPage(QtWidgets.QWidget):
         layout.addWidget(self.chk_show_screen)
         layout.addWidget(self.chk_on_top)
         layout.addWidget(QtWidgets.QLabel('日志'))
+        layout.addWidget(self.chk_auto_save)
+        layout.addWidget(self.chk_idf)
+        layout.addWidget(self.chk_ansi)
         kw_row1 = QtWidgets.QHBoxLayout()
         kw_row1.addWidget(QtWidgets.QLabel('错误关键词'))
         kw_row1.addWidget(self.edit_kw_alert, 1)

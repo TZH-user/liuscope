@@ -125,7 +125,7 @@ def test_ansi_render_ui():
     try:
         win = mw.MainWindow()
         win._port_watch_timer.stop()
-        assert win.chk_ansi.isChecked(), 'ANSI 渲染默认开'
+        assert win.settings_page.chk_ansi.isChecked(), 'ANSI 渲染默认开'
 
         # 无 SGR 行：空格保排版（落进文档的是普通空格，查找/悬停不受影响）
         win._append_log('RX', '│ A │  BB │')
@@ -165,7 +165,7 @@ def test_ansi_render_ui():
         assert cur.charFormat().fontWeight() >= 700, 'SGR 1 应映射为粗体字符格式'
 
         # 开关关闭 → 回落旧行为：转义码原样显示、空白折叠
-        win.chk_ansi.setChecked(False)
+        win.settings_page.chk_ansi.setChecked(False)
         win._append_log('RX', 'a  b\x1b[31m红')
         text = win.log.toPlainText()
         assert '\x1b[31m' in text, '关闭渲染后转义码应原样显示（旧行为）'
@@ -174,7 +174,7 @@ def test_ansi_render_ui():
         assert read_setting('log/ansi_render', '1') == '0', '开关状态应持久化'
 
         # TX/SYS 行不走 ANSI 路径（聊天式右对齐/系统行不变）
-        win.chk_ansi.setChecked(True)
+        win.settings_page.chk_ansi.setChecked(True)
         n0 = len(win.message_entries)
         win._append_log('TX', 'hello  world')
         assert win.message_entries[-1]['direction'] == 'TX'

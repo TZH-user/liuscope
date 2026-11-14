@@ -341,31 +341,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_export_log.setObjectName('tool')
         self.btn_export_log.setToolTip('把当前 RX 日志（全部条目）导出为文本文件')
         self.btn_export_log.clicked.connect(self._export_log)
-        self.chk_auto_save = QtWidgets.QCheckBox('自动保存日志')
-        self.chk_auto_save.setChecked(True)
-        self.chk_auto_save.setToolTip('收发的每条日志实时追加到 logs/serial_auto_log_*.txt（SYS 除外）')
-        self.lbl_log_path = QtWidgets.QLabel('自动日志将在首次收到数据后生成到 logs 目录')
+        # 自动保存路径标签：ElidedLabel（前半显示+后半省略，悬停 tooltip 全文）——
+        # 此前裸 QLabel 显示完整路径把顶行乃至窗口撑到收不动（用户实测）。
+        # 三开关（自动保存/ESP-IDF 解析/ANSI 渲染）已迁设置页「日志」区。
+        self.lbl_log_path = ElidedLabel('自动日志将在首次收到数据后生成到 logs 目录')
         self.lbl_log_path.setObjectName('backlog')
 
-        # ---- ESP-IDF 日志解析（v1.3.0：等级着色 + 复位横幅 + panic/backtrace 收集） ----
-        self.chk_idf = QtWidgets.QCheckBox('ESP-IDF 日志解析')
-        self.chk_idf.setChecked(read_setting('log/esp_idf_parse', '1') != '0')
-        self.chk_idf.setToolTip(
-            '识别 ESP-IDF 日志（等级着色）、复位横幅（rst:0x…）与 Guru Meditation 崩溃，\n'
-            '并收集 backtrace 地址供「解析 backtrace」翻译成源码位置')
-        self.chk_idf.toggled.connect(lambda on: write_setting('log/esp_idf_parse', '1' if on else '0'))
         self._esp32_bt: list[str] = []   # backtrace 地址收集器（复位横幅/清空记录时重置）
 
-        # ---- ANSI 终端渲染（SGR 着色 + 框线/艺术字排版保留） ----
-        self.chk_ansi = QtWidgets.QCheckBox('ANSI 渲染')
-        self.chk_ansi.setChecked(read_setting('log/ansi_render', '1') != '0')
-        self.chk_ansi.setToolTip(
-            '渲染串口回传里的 ANSI 转义序列：SGR 颜色（16/256 色/真彩）按设备指定着色，\n'
-            '粗体/斜体/下划线/反显生效；空格保排版，框线图与 ASCII 艺术字不塌陷。\n'
-            '光标移动/清屏等对滚动日志无意义的序列自动剥除；对比度过低的颜色自动混合保底。\n'
-            '对不含转义码的行零影响；HEX 显示模式不走本渲染，二进制协议建议用 HEX 查看。\n'
-            '原文条目与自动保存日志不受影响，始终记录原始字节解码结果')
-        self.chk_ansi.toggled.connect(lambda on: write_setting('log/ansi_render', '1' if on else '0'))
         self.btn_backtrace = QtWidgets.QPushButton('解析 backtrace')
         self.btn_backtrace.setObjectName('tool')
         self.btn_backtrace.setEnabled(False)
@@ -373,9 +356,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_backtrace.clicked.connect(self._show_backtrace_dialog)
 
         logbar = QtWidgets.QHBoxLayout()
-        logbar.addWidget(self.chk_auto_save)
-        logbar.addWidget(self.chk_idf)
-        logbar.addWidget(self.chk_ansi)
         logbar.addWidget(self.lbl_log_path, 1)
         # ESP32 线控放日志行右段（顶行宽度有限；连接后可用，tooltip 带语义）
         logbar.addWidget(self.btn_mc_reset)
@@ -1519,11 +1499,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _flush_auto_log(self):
         """自动日志节拍：勾选开 → 懒建文件落盘；勾选关 → 积压直接丢（对齐主线）。"""
-        if not self.chk_auto_save.isChecked():
+        if not self.settings_page.chk_auto_save.isChecked():
             self._auto_log.discard()
             return
         if self._auto_log.flush() and self._auto_log.path:
-            self.lbl_log_path.setText(f'日志: {self._auto_log.path}')
+            self.lbl_log_path.setText(f'自动保存: {self._auto_log.path}')
 
     def _export_log(self):
         default_name = f'serial_export_{datetime.datetime.now():%Y%m%d_%H%M%S}.txt'
@@ -1626,7 +1606,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if len(self.message_entries) > MAX_LOG_ENTRIES:
             # 长跑防涨：与主线同款裁剪量（丢最老 4000 条）
             del self.message_entries[:MAX_LOG_TRIM]
-        if direction != 'SYS' and self.chk_auto_save.isChecked():
+        if direction != 'SYS' and self.settings_page.chk_auto_save.isChecked():
             self._auto_log.enqueue(format_entry_block(now, direction, text))
         if direction == 'RX':
             fault_info = self.fault.record_line(text)   # !FAULT 行 → 故障诊断页记录
@@ -1639,7 +1619,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 日志行配色动态读主题模块（切主题后新日志行随新主题换色）
         color = {'RX': theme.RX_COLOR, 'TX': theme.TX_COLOR}.get(direction, theme.SYS_COLOR)
         bold = False
-        if direction == 'RX' and self.chk_idf.isChecked():
+        if direction == 'RX' and self.settings_page.chk_idf.isChecked():
             color, marker, bold = self._esp32_log_style(text)
             if marker is not None:
                 self._append_log('SYS', marker)   # 复位横幅装饰行（递归，落在 RX 行前）
@@ -1655,7 +1635,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if kw_color:
                 color = kw_color
                 bold = True
-        if direction == 'RX' and self.chk_ansi.isChecked():
+        if direction == 'RX' and self.settings_page.chk_ansi.isChecked():
             # ANSI 渲染：显示段以字符格式直插文档——文本零损耗（查找/悬停互转
             # 按原文工作），空格天然保排版（框线图/艺术字不塌陷），非 SGR 转义
             # （清屏/光标移动）同样剥除。无 SGR 行回落 IDF/默认整行样式。
