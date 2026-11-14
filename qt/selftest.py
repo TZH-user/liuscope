@@ -3506,6 +3506,23 @@ def test_theme_custom_and_pages():
         win.settings_page.chk_show_stm32.setChecked(True)
         assert win.tabs.isTabVisible(win.tabs.indexOf(win.stm32_tabs)), '重新勾选应恢复显示'
 
+        # ---- 标题栏提示位（真机 X/Alt+F4 关窗的开关，用户实测无法关窗的根因）----
+        # PySide6 6.12 默认 flags 无 CloseHint 且不带 CustomizeWindowHint 的
+        # setWindowFlags 会被平台层剥位——离屏平台无标题栏暴露不了，此处固化断言
+        from PySide6 import QtCore as _QC  # noqa: PLC0415
+        _wt = _QC.Qt.WindowType
+        _need = (_wt.CustomizeWindowHint | _wt.WindowSystemMenuHint
+                 | _wt.WindowMinimizeButtonHint | _wt.WindowMaximizeButtonHint
+                 | _wt.WindowCloseButtonHint)
+        assert (win.windowFlags() & _need) == _need, \
+            f'构造后标题栏提示位不全: {hex(int(win.windowFlags()))}'
+        win._apply_on_top(True)
+        assert (win.windowFlags() & _need) == _need and win.isVisible(), \
+            f'置顶ON 剥位或窗口隐身: {hex(int(win.windowFlags()))}'
+        win._apply_on_top(False)
+        assert (win.windowFlags() & _need) == _need and win.isVisible(), \
+            f'置顶OFF 剥位或窗口隐身: {hex(int(win.windowFlags()))}'
+
         # ---- 自定义主题 ----
         idx = combo.findData('custom')
         assert idx >= 0, '主题下拉应含「自定义」'

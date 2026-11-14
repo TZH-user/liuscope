@@ -157,8 +157,28 @@ class ElidedLabel(QtWidgets.QLabel):
 class MainWindow(QtWidgets.QMainWindow):
     FLUSH_INTERVAL_MS = 200
 
+    # 标准标题栏提示位全集（含 CustomizeWindowHint）：PySide6 6.12 的 QWidget 默认
+    # flags 不含 WindowCloseButtonHint，Windows 平台据此把系统菜单 SC_CLOSE 置灰
+    # → 标题栏 X 灰死、Alt+F4 失效（用户实测"窗口无法关闭"；offscreen 无标题栏故
+    # 离屏自测暴露不了）。而**任何** setWindowFlags 若不带 CustomizeWindowHint，
+    # 窗口重建时平台层会剥掉显式声明的提示位（实测 0x8000f001→0xf001）——所以
+    # 补位必须带 Customize 且位要齐全（缺谁灰谁）。置顶开关 _apply_on_top 亦复用。
+    _STD_TITLEBAR_HINTS = (
+        QtCore.Qt.WindowType.CustomizeWindowHint
+        | QtCore.Qt.WindowType.WindowTitleHint
+        | QtCore.Qt.WindowType.WindowSystemMenuHint
+        | QtCore.Qt.WindowType.WindowMinimizeButtonHint
+        | QtCore.Qt.WindowType.WindowMaximizeButtonHint
+        | QtCore.Qt.WindowType.WindowCloseButtonHint)
+
     def __init__(self):
         super().__init__()
+        # 补标准标题栏提示位（详见 _STD_TITLEBAR_HINTS 注释）：本组合必须带
+        # CustomizeWindowHint 否则创建期被剥。show 前的设置在创建时仍可能被
+        # 平台层按未定制重写，真正兜底靠 _ensure_titlebar_hints 首显后补设。
+        self.setWindowFlags(self.windowFlags() | self._STD_TITLEBAR_HINTS)
+        self._titlebar_done = False
+        QtCore.QTimer.singleShot(0, self._ensure_titlebar_hints)
         # 启动主题恢复（读设置键 ui/theme，缺省深色）：先于各页创建，
         # pyqtgraph 控件即按主题背景/前景初始化（main.py 的深色 QSS 由这里覆盖统一）
         theme.apply_saved_theme(QtWidgets.QApplication.instance())
@@ -1192,14 +1212,30 @@ class MainWindow(QtWidgets.QMainWindow):
         if cur.hasSelection():
             QtWidgets.QApplication.clipboard().setText(cur.selectedText())
 
+    def _ensure_titlebar_hints(self):
+        """首次显示后补标题栏提示位（构造期设置的 Close 位在窗口创建时被平台层
+        重写剥掉——PySide6 6.12 实测；show 后带 CustomizeWindowHint 的 setWindowFlags
+        才真正生效并跨重建保持）。"""
+        if self._titlebar_done or not self.isVisible():
+            return          # 未显示（测试/已关）不动，防止把关掉的窗口再拉起来
+        self._titlebar_done = True
+        flags = self.windowFlags()
+        if (flags & self._STD_TITLEBAR_HINTS) != self._STD_TITLEBAR_HINTS:
+            self.setWindowFlags(flags | self._STD_TITLEBAR_HINTS)
+            if self.isVisible():
+                self.show()   # setWindowFlags 会隐藏窗口，重新 show（同 _apply_on_top）
+
     def _apply_on_top(self, on: bool):
-        """窗口置顶开关（设置页）：setWindowFlags 需要重新 show 一次才生效。"""
+        """窗口置顶开关（设置页）：setWindowFlags 需要重新 show 一次才生效。
+        每次都把标准标题栏提示位一并带上（不带 CustomizeWindowHint 的重建会剥位）；
+        6.12 的 setWindowFlags 会先隐藏窗口，重 show 须按调用前的可见性判断。"""
         hint = QtCore.Qt.WindowType.WindowStaysOnTopHint
         flags = self.windowFlags()
-        new_flags = (flags | hint) if on else (flags & ~hint)
+        new_flags = ((flags | hint) if on else (flags & ~hint)) | self._STD_TITLEBAR_HINTS
         if new_flags != flags:
+            was_visible = self.isVisible()
             self.setWindowFlags(new_flags)
-            if self.isVisible():
+            if was_visible and not self.isVisible():
                 self.show()
 
     def _log_stamp(self) -> str:
