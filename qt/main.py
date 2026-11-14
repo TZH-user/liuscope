@@ -46,5 +46,10 @@ if __name__ == '__main__':
             import traceback
             traceback.print_exc()
             os._exit(1)
-        sys.exit(rc)
+        # 判定完成后硬退，跳过解释器 teardown：PyInstaller 下 CPython 关机阶段
+        # 偶发 ucrtbase fast-fail 把退出码映成 127（_verify/selftest_gate.py 同款
+        # 处置——测试判定全部完成于 run_selftest 返回之前，teardown 无被测逻辑）
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(max(0, rc))
     sys.exit(main())
